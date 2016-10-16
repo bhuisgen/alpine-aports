@@ -1,0 +1,701 @@
+--- zabbix-3.2.1.orig/configure.ac
++++ zabbix-3.2.1/configure.ac
+@@ -1523,6 +1523,16 @@
+ 		;;
+ esac		
+ 
++dnl Custom rootfs path
++AC_ARG_VAR(ROOTFS, custom rootfs path)
++AC_MSG_CHECKING([for custom rootfs path])
++if test "x${ROOTFS}" = "x"; then
++	AC_MSG_RESULT([no])
++else
++	AC_MSG_RESULT([yes])
++fi
++AC_DEFINE_UNQUOTED(ROOTFS, "${ROOTFS}", [Rootfs path.])
++
+ 
+ dnl *****************************************************************
+ dnl *                                                               *
+--- zabbix-3.2.1.orig/src/libs/zbxnix/fatal.c
++++ zabbix-3.2.1/src/libs/zbxnix/fatal.c
+@@ -315,7 +315,7 @@
+ 
+ 	zabbix_log(LOG_LEVEL_CRIT, "=== Memory map: ===");
+ 
+-	if (NULL != (fd = fopen("/proc/self/maps", "r")))
++	if (NULL != (fd = fopen(ROOTFS "/proc/self/maps", "r")))
+ 	{
+ 		char line[1024];
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/common/common.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/common/common.c
+@@ -29,7 +29,7 @@
+ #include "zbxexec.h"
+ 
+ #if !defined(_WINDOWS)
+-#	define VFS_TEST_FILE "/etc/passwd"
++#	define VFS_TEST_FILE ROOTFS "/etc/passwd"
+ #	define VFS_TEST_REGEXP "root"
+ #else
+ #	define VFS_TEST_FILE "c:\\windows\\win.ini"
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/freebsd/diskio.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/freebsd/diskio.c
+@@ -22,7 +22,7 @@
+ #include "stats.h"
+ #include "diskdevices.h"
+ 
+-#define ZBX_DEV_PFX	"/dev/"
++#define ZBX_DEV_PFX	ROOTFS "/dev/"
+ #define ZBX_DEV_READ	0
+ #define ZBX_DEV_WRITE	1
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/hpux/net.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/hpux/net.c
+@@ -386,7 +386,7 @@
+ {
+ 	int	fd, ppa;
+ 
+-	if (-1 == (fd = open("/dev/dlpi", O_RDWR)))
++	if (-1 == (fd = open(ROOTFS "/dev/dlpi", O_RDWR)))
+ 		return FAIL;
+ 
+ 	if (FAIL == get_ppa(fd, if_name, &ppa))
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/boottime.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/boottime.c
+@@ -30,9 +30,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/stat", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/stat", zbx_strerror(errno)));
+ 		return ret;
+ 	}
+ 
+@@ -51,7 +51,7 @@
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"btime\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"btime\" in %s.", ROOTFS "/proc/stat"));
+ 
+ 	return ret;
+ }
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/cpu.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/cpu.c
+@@ -196,9 +196,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/stat", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/stat", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -217,7 +217,7 @@
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"ctxt\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"ctxt\" in %s.", ROOTFS "/proc/stat"));
+ 
+ 	return ret;
+ }
+@@ -231,9 +231,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/stat", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/stat", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -252,7 +252,7 @@
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"intr\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"intr\" in %s.", ROOTFS "/proc/stat"));
+ 
+ 	return ret;
+ }
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/diskio.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/diskio.c
+@@ -22,12 +22,12 @@
+ #include "stats.h"
+ #include "diskdevices.h"
+ 
+-#define ZBX_DEV_PFX	"/dev/"
++#define ZBX_DEV_PFX	ROOTFS "/dev/"
+ #define ZBX_DEV_READ	0
+ #define ZBX_DEV_WRITE	1
+ 
+ #if defined(KERNEL_2_4)
+-#	define INFO_FILE_NAME	"/proc/partitions"
++#	define INFO_FILE_NAME	ROOTFS "/proc/partitions"
+ #	define PARSE(line)	if (sscanf(line, ZBX_FS_UI64 ZBX_FS_UI64 " %*d %s " 		\
+ 					ZBX_FS_UI64 " %*d " ZBX_FS_UI64 " %*d "			\
+ 					ZBX_FS_UI64 " %*d " ZBX_FS_UI64 " %*d %*d %*d %*d",	\
+@@ -40,7 +40,7 @@
+ 				&ds[ZBX_DSTAT_W_SECT]						\
+ 				) != 7) continue
+ #else
+-#	define INFO_FILE_NAME	"/proc/diskstats"
++#	define INFO_FILE_NAME	ROOTFS "/proc/diskstats"
+ #	define PARSE(line)	if (sscanf(line, ZBX_FS_UI64 ZBX_FS_UI64 " %s "			\
+ 					ZBX_FS_UI64 " %*d " ZBX_FS_UI64 " %*d "			\
+ 					ZBX_FS_UI64 " %*d " ZBX_FS_UI64 " %*d %*d %*d %*d",	\
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/diskspace.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/diskspace.c
+@@ -127,9 +127,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/mounts", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/mounts", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/mounts: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/mounts", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/hardware.h
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/hardware.h
+@@ -24,7 +24,7 @@
+ #define SMBIOS_STATUS_ERROR	2
+ #define SMBIOS_STATUS_OK	3
+ 
+-#define DEV_MEM			"/dev/mem"
++#define DEV_MEM			ROOTFS "/dev/mem"
+ #define SMBIOS_ENTRY_POINT_SIZE	0x20
+ #define DMI_HEADER_SIZE		4
+ 
+@@ -36,9 +36,9 @@
+ #define DMI_GET_MODEL		0x04
+ #define DMI_GET_SERIAL		0x08
+ 
+-#define CPU_MAX_FREQ_FILE	"/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq"
++#define CPU_MAX_FREQ_FILE	ROOTFS "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq"
+ 
+-#define HW_CPU_INFO_FILE	"/proc/cpuinfo"
++#define HW_CPU_INFO_FILE	ROOTFS "/proc/cpuinfo"
+ #define HW_CPU_ALL_CPUS		-1
+ #define HW_CPU_SHOW_ALL		1
+ #define HW_CPU_SHOW_MAXFREQ	2
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/kernel.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/kernel.c
+@@ -45,9 +45,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (SYSINFO_RET_FAIL == read_uint64_from_procfs("/proc/sys/fs/file-max", &value))
++	if (SYSINFO_RET_FAIL == read_uint64_from_procfs(ROOTFS "/proc/sys/fs/file-max", &value))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain data from /proc/sys/fs/file-max."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain data from %s.", ROOTFS "/proc/sys/fs/file-max"));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -61,9 +61,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (SYSINFO_RET_FAIL == read_uint64_from_procfs("/proc/sys/kernel/pid_max", &value))
++	if (SYSINFO_RET_FAIL == read_uint64_from_procfs(ROOTFS "/proc/sys/kernel/pid_max", &value))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain data from /proc/sys/kernel/pid_max."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain data from %s.", ROOTFS "/proc/sys/kernel/pid_max"));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/memory.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/memory.c
+@@ -73,15 +73,15 @@
+ 	zbx_uint64_t	value;
+ 	int		res;
+ 
+-	if (NULL == (f = fopen("/proc/meminfo", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/meminfo", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/meminfo: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/meminfo", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "Cached:", NULL, &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of Cached from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of Cached from %s.", ROOTFS "/proc/meminfo"));
+ 		goto close;
+ 	}
+ 
+@@ -140,15 +140,15 @@
+ 
+ 	/* try MemAvailable (present since Linux 3.14), falling back to a calculation based on sysinfo() and Cached */
+ 
+-	if (NULL == (f = fopen("/proc/meminfo", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/meminfo", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/meminfo: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/meminfo", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "MemAvailable:", "Cached:", &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of MemAvailable from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of MemAvailable from %s.", ROOTFS "/proc/meminfo"));
+ 		goto close;
+ 	}
+ 
+@@ -161,7 +161,7 @@
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "Cached:", NULL, &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of Cached from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of Cached from %s.", ROOTFS "/proc/meminfo"));
+ 		goto close;
+ 	}
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/net.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/net.c
+@@ -211,9 +211,9 @@
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	if (NULL == (f = fopen("/proc/net/dev", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/net/dev", "r")))
+ 	{
+-		*error = zbx_dsprintf(NULL, "Cannot open /proc/net/dev: %s", zbx_strerror(errno));
++		*error = zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/net/dev", zbx_strerror(errno));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -251,7 +251,7 @@
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+ 	{
+-		*error = zbx_strdup(NULL, "Cannot find information for this network interface in /proc/net/dev.");
++		*error = zbx_dsprintf(NULL, "Cannot find information for this network interface in %s.", ROOTFS "/proc/net/dev");
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -529,9 +529,9 @@
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/net/dev", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/net/dev", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/net/dev: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc/net/dev", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -630,11 +630,11 @@
+ 		}
+ 
+ 		zabbix_log(LOG_LEVEL_DEBUG, "netlink interface error: %s", error);
+-		zabbix_log(LOG_LEVEL_DEBUG, "falling back on reading /proc/net/tcp...");
++		zabbix_log(LOG_LEVEL_DEBUG, "falling back on reading %s...", ROOTFS "/proc/net/tcp");
+ #endif
+ 		buffer = zbx_malloc(NULL, buffer_alloc);
+ 
+-		if (0 < (n = proc_read_tcp_listen("/proc/net/tcp", &buffer, &buffer_alloc)))
++		if (0 < (n = proc_read_tcp_listen(ROOTFS "/proc/net/tcp", &buffer, &buffer_alloc)))
+ 		{
+ 			ret = SYSINFO_RET_OK;
+ 
+@@ -647,7 +647,7 @@
+ 			}
+ 		}
+ 
+-		if (0 < (n = proc_read_tcp_listen("/proc/net/tcp6", &buffer, &buffer_alloc)))
++		if (0 < (n = proc_read_tcp_listen(ROOTFS "/proc/net/tcp6", &buffer, &buffer_alloc)))
+ 		{
+ 			ret = SYSINFO_RET_OK;
+ 
+@@ -690,7 +690,7 @@
+ 
+ 	buffer = zbx_malloc(NULL, buffer_alloc);
+ 
+-	if (0 < (n = proc_read_file("/proc/net/udp", &buffer, &buffer_alloc)))
++	if (0 < (n = proc_read_file(ROOTFS "/proc/net/udp", &buffer, &buffer_alloc)))
+ 	{
+ 		ret = SYSINFO_RET_OK;
+ 
+@@ -705,7 +705,7 @@
+ 		}
+ 	}
+ 
+-	if (0 < (n = proc_read_file("/proc/net/udp6", &buffer, &buffer_alloc)))
++	if (0 < (n = proc_read_file(ROOTFS "/proc/net/udp6", &buffer, &buffer_alloc)))
+ 	{
+ 		ret = SYSINFO_RET_OK;
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/proc.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/proc.c
+@@ -323,7 +323,7 @@
+ 	FILE	*f;
+ 	int	ret = FAIL;
+ 
+-	if (NULL != (f = fopen("/proc/meminfo", "r")))
++	if (NULL != (f = fopen(ROOTFS "/proc/meminfo", "r")))
+ 	{
+ 		ret = byte_value_from_proc_file(f, "MemTotal:", NULL, total_memory);
+ 		zbx_fclose(f);
+@@ -506,9 +506,9 @@
+ 		}
+ 	}
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -520,12 +520,12 @@
+ 		if (0 == strcmp(entries->d_name, "self"))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/cmdline", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/cmdline", entries->d_name);
+ 
+ 		if (NULL == (f_cmd = fopen(tmp, "r")))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/status", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/status", entries->d_name);
+ 
+ 		if (NULL == (f_stat = fopen(tmp, "r")))
+ 			continue;
+@@ -769,9 +769,9 @@
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -783,12 +783,12 @@
+ 		if (0 == strcmp(entries->d_name, "self"))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/cmdline", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/cmdline", entries->d_name);
+ 
+ 		if (NULL == (f_cmd = fopen(tmp, "r")))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/status", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/status", entries->d_name);
+ 
+ 		if (NULL == (f_stat = fopen(tmp, "r")))
+ 			continue;
+@@ -837,7 +837,7 @@
+ 	int	n, fd;
+ 	char	tmp[MAX_STRING_LEN], *pend, *pstart;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/stat", (int)pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d/stat", (int)pid);
+ 
+ 	if (-1 == (fd = open(tmp, O_RDONLY)))
+ 		return FAIL;
+@@ -885,7 +885,7 @@
+ 	size_t	cmdline_alloc = ZBX_KIBIBYTE;
+ 
+ 	*cmdline_nbytes = 0;
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/cmdline", (int)pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d/cmdline", (int)pid);
+ 
+ 	if (-1 == (fd = open(tmp, O_RDONLY)))
+ 		return FAIL;
+@@ -946,7 +946,7 @@
+ 	char		tmp[MAX_STRING_LEN];
+ 	zbx_stat_t	st;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d", (int)pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d", (int)pid);
+ 
+ 	if (0 != zbx_stat(tmp, &st))
+ 		return FAIL;
+@@ -1003,7 +1003,7 @@
+ 	int	n, offset, fd, ret = SUCCEED;
+ 	char	tmp[MAX_STRING_LEN], *ptr;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/stat", (int)procutil->pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d/stat", (int)procutil->pid);
+ 
+ 	if (-1 == (fd = open(tmp, O_RDONLY)))
+ 		return -errno;
+@@ -1247,7 +1247,7 @@
+ 
+ 	zabbix_log(LOG_LEVEL_TRACE, "In %s()", __function_name);
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 		goto out;
+ 
+ 	while (NULL != (entries = readdir(dir)))
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/sensors.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/sensors.c
+@@ -21,9 +21,9 @@
+ #include "zbxregexp.h"
+ 
+ #ifdef KERNEL_2_4
+-#define DEVICE_DIR	"/proc/sys/dev/sensors"
++#define DEVICE_DIR	ROOTFS "/proc/sys/dev/sensors"
+ #else
+-#define DEVICE_DIR	"/sys/class/hwmon"
++#define DEVICE_DIR	ROOTFS "/sys/class/hwmon"
+ static char	*locations[] = {"", "/device", NULL};
+ #endif
+ 
+@@ -181,7 +181,7 @@
+ 		}
+ 		else
+ 		{
+-			zbx_snprintf(bus_path, sizeof(bus_path), "/sys/class/i2c-adapter/i2c-%d", bus_i2c);
++			zbx_snprintf(bus_path, sizeof(bus_path), ROOTFS "/sys/class/i2c-adapter/i2c-%d", bus_i2c);
+ 			bus_subfolder = sysfs_read_attr(bus_path, &bus_attr);
+ 
+ 			if (NULL != bus_subfolder && '\0' != *bus_subfolder)
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/software.h
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/software.h
+@@ -20,10 +20,10 @@
+ #ifndef ZABBIX_SOFTWARE_H
+ #define ZABBIX_SOFTWARE_H
+ 
+-#define SW_OS_FULL			"/proc/version"
+-#define SW_OS_SHORT 			"/proc/version_signature"
+-#define SW_OS_NAME			"/etc/issue.net"
+-#define SW_OS_NAME_RELEASE		"/etc/os-release"
++#define SW_OS_FULL			ROOTFS "/proc/version"
++#define SW_OS_SHORT 			ROOTFS "/proc/version_signature"
++#define SW_OS_NAME			ROOTFS "/etc/issue.net"
++#define SW_OS_NAME_RELEASE		ROOTFS "/etc/os-release"
+ 
+ #define SW_OS_OPTION_PRETTY_NAME	"PRETTY_NAME"
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/linux/swap.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/linux/swap.c
+@@ -78,7 +78,7 @@
+ swap_stat_t;
+ 
+ #ifdef KERNEL_2_4
+-#	define INFO_FILE_NAME	"/proc/partitions"
++#	define INFO_FILE_NAME	ROOTFS "/proc/partitions"
+ #	define PARSE(line)								\
+ 											\
+ 		if (6 != sscanf(line, "%d %d %*d %*s "					\
+@@ -92,7 +92,7 @@
+ 				&result->wsect		/* wsect */			\
+ 				)) continue
+ #else
+-#	define INFO_FILE_NAME	"/proc/diskstats"
++#	define INFO_FILE_NAME	ROOTFS "/proc/diskstats"
+ #	define PARSE(line)								\
+ 											\
+ 		if (6 != sscanf(line, "%d %d %*s "					\
+@@ -158,9 +158,9 @@
+ 	FILE	*f;
+ 
+ #ifdef KERNEL_2_4
+-	if (NULL != (f = fopen("/proc/stat", "r")))
++	if (NULL != (f = fopen(ROOTFS "/proc/stat", "r")))
+ #else
+-	if (NULL != (f = fopen("/proc/vmstat", "r")))
++	if (NULL != (f = fopen(ROOTFS "/proc/vmstat", "r")))
+ #endif
+ 	{
+ 		while (NULL != fgets(line, sizeof(line), f))
+@@ -215,15 +215,15 @@
+ 		ret = get_swap_pages(result);
+ 		swapdev = NULL;
+ 	}
+-	else if (0 != strncmp(swapdev, "/dev/", 5))
++	else if (0 != strncmp(swapdev, ROOTFS "/dev/", 5))
+ 		offset = 5;
+ 
+-	if (NULL == (f = fopen("/proc/swaps", "r")))
++	if (NULL == (f = fopen(ROOTFS "/proc/swaps", "r")))
+ 		return ret;
+ 
+ 	while (NULL != fgets(line, sizeof(line), f))
+ 	{
+-		if (0 != strncmp(line, "/dev/", 5))
++		if (0 != strncmp(line, ROOTFS "/dev/", 5))
+ 			continue;
+ 
+ 		if (NULL == (s = strchr(line, ' ')))
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/osf/proc.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/osf/proc.c
+@@ -75,15 +75,15 @@
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	while (NULL != (entries = readdir(dir)))
+ 	{
+-		strscpy(filename, "/proc/");
++		strscpy(filename, ROOTFS "/proc/");
+ 		zbx_strlcat(filename, entries->d_name, MAX_STRING_LEN);
+ 
+ 		if (0 == zbx_stat(filename, &buf))
+@@ -199,15 +199,15 @@
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	while (NULL != (entries = readdir(dir)))
+ 	{
+-		strscpy(filename, "/proc/");
++		strscpy(filename, ROOTFS "/proc/");
+ 		zbx_strlcat(filename, entries->d_name,MAX_STRING_LEN);
+ 
+ 		if (0 == zbx_stat(filename, &buf))
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/solaris/diskspace.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/solaris/diskspace.c
+@@ -199,9 +199,9 @@
+ 	struct zbx_json	j;
+ 
+ 	/* opening the mounted filesystems file */
+-	if (NULL == (f = fopen("/etc/mnttab", "r")))
++	if (NULL == (f = fopen(ROOTFS "/etc/mnttab", "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /etc/mnttab: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/etc/mnttab", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+--- zabbix-3.2.1.orig/src/libs/zbxsysinfo/solaris/proc.c
++++ zabbix-3.2.1/src/libs/zbxsysinfo/solaris/proc.c
+@@ -159,9 +159,9 @@
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc" zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -173,7 +173,7 @@
+ 			fd = -1;
+ 		}
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/psinfo", entries->d_name);
+ 
+ 		if (-1 == (fd = open(tmp, O_RDONLY)))
+ 			continue;
+@@ -308,9 +308,9 @@
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", ROOTFS "/proc", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -322,7 +322,7 @@
+ 			fd = -1;
+ 		}
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/psinfo", entries->d_name);
+ 
+ 		if (0 != zbx_stat(tmp, &buf))
+ 			continue;
+@@ -504,7 +504,7 @@
+ 	psinfo_t	psinfo;
+ 	prusage_t	prusage;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/psinfo", (int)procutil->pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d/psinfo", (int)procutil->pid);
+ 
+ 	if (-1 == (fd = open(tmp, O_RDONLY)))
+ 		return -errno;
+@@ -517,7 +517,7 @@
+ 
+ 	procutil->starttime = psinfo.pr_start.tv_sec;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/usage", (int)procutil->pid);
++	zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%d/status", (int)procutil->pid);
+ 
+ 	if (-1 == (fd = open(tmp, O_RDONLY)))
+ 		return -errno;
+@@ -588,7 +588,7 @@
+ 
+ 	zabbix_log(LOG_LEVEL_TRACE, "In %s()", __function_name);
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	if (NULL == (dir = opendir(ROOTFS "/proc")))
+ 		goto out;
+ 
+ 	while (NULL != (entries = readdir(dir)))
+@@ -597,7 +597,7 @@
+ 		if (FAIL == is_uint32(entries->d_name, &pid))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), ROOTFS "/proc/%s/psinfo", entries->d_name);
+ 
+ 		if (-1 == (fd = open(tmp, O_RDONLY)))
+ 			continue;
+--- zabbix-3.2.1.orig/src/zabbix_agent/cpustat.c
++++ zabbix-3.2.1/src/zabbix_agent/cpustat.c
+@@ -315,7 +315,7 @@
+ 	FILE		*file;
+ 	char		line[1024];
+ 	unsigned char	*cpu_status = NULL;
+-	const char	*filename = "/proc/stat";
++	const char	*filename = ROOTFS "/proc/stat";
+ 
+ #elif defined(HAVE_SYS_PSTAT_H)
+ 
+--- zabbix-3.2.1.orig/src/zabbix_agent/stats.c
++++ zabbix-3.2.1/src/zabbix_agent/stats.c
+@@ -102,7 +102,7 @@
+ 	FILE	*f = NULL;
+ 	int	ncpu = 0;
+ 
+-	if (NULL == (file = fopen("/proc/cpuinfo", "r")))
++	if (NULL == (file = fopen(ROOTFS "/proc/cpuinfo", "r")))
+ 		goto return_one;
+ 
+ 	while (NULL != fgets(line, 1024, file))
