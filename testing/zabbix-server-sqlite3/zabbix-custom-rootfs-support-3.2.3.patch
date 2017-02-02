@@ -1,0 +1,2525 @@
+From efd9c74fcb2fb2f1dc399a5781f470933ab948c1 Mon Sep 17 00:00:00 2001
+From: Boris HUISGEN <boris@foobot.io>
+Date: Thu, 2 Feb 2017 15:31:31 +0100
+Subject: [PATCH] Add custom rootfs path support
+
+---
+ conf/zabbix_agentd.conf                     |  14 +++
+ configure.ac                                |   1 +
+ include/common.h                            |  35 +++---
+ include/zbxtypes.h                          |   6 -
+ src/libs/zbxcommon/file.c                   | 185 +++++++++++++++++++++++++++-
+ src/libs/zbxcommon/misc.c                   |  28 -----
+ src/libs/zbxconf/cfg.c                      |  32 ++---
+ src/libs/zbxcrypto/tls.c                    |   2 +-
+ src/libs/zbxicmpping/icmpping.c             |   4 +-
+ src/libs/zbxlog/log.c                       |   8 +-
+ src/libs/zbxnix/fatal.c                     |   2 +-
+ src/libs/zbxnix/pid.c                       |  10 +-
+ src/libs/zbxsysinfo/common/file.c           |  83 ++++++++++++-
+ src/libs/zbxsysinfo/hpux/net.c              |  12 +-
+ src/libs/zbxsysinfo/linux/boottime.c        |   9 +-
+ src/libs/zbxsysinfo/linux/cpu.c             |  18 +--
+ src/libs/zbxsysinfo/linux/diskio.c          |   4 +-
+ src/libs/zbxsysinfo/linux/diskspace.c       |   7 +-
+ src/libs/zbxsysinfo/linux/hardware.c        |  14 +--
+ src/libs/zbxsysinfo/linux/kernel.c          |  16 ++-
+ src/libs/zbxsysinfo/linux/memory.c          |  20 +--
+ src/libs/zbxsysinfo/linux/net.c             |  52 +++++---
+ src/libs/zbxsysinfo/linux/proc.c            |  85 ++++++++-----
+ src/libs/zbxsysinfo/linux/sensors.c         |  24 ++--
+ src/libs/zbxsysinfo/linux/software.c        |   8 +-
+ src/libs/zbxsysinfo/linux/swap.c            |  32 +++--
+ src/libs/zbxsysinfo/openbsd/net.c           |   2 +-
+ src/libs/zbxsysinfo/osf/proc.c              |  34 ++---
+ src/libs/zbxsysinfo/solaris/diskspace.c     |   8 +-
+ src/libs/zbxsysinfo/solaris/proc.c          |  66 ++++++----
+ src/zabbix_agent/cpustat.c                  |   7 +-
+ src/zabbix_agent/logfiles.c                 |  19 +--
+ src/zabbix_agent/stats.c                    |   5 +-
+ src/zabbix_agent/zabbix_agentd.c            |   2 +
+ src/zabbix_agent/zbxconf.c                  |   1 +
+ src/zabbix_agent/zbxconf.h                  |   3 +
+ src/zabbix_get/Makefile.am                  |   6 +-
+ src/zabbix_sender/Makefile.am               |   6 +-
+ src/zabbix_sender/zabbix_sender.c           |   4 +-
+ src/zabbix_server/snmptrapper/snmptrapper.c |   6 +-
+ 40 files changed, 618 insertions(+), 262 deletions(-)
+
+diff --git a/conf/zabbix_agentd.conf b/conf/zabbix_agentd.conf
+index 3a6fe59c62..f08c93166c 100644
+--- a/conf/zabbix_agentd.conf
++++ b/conf/zabbix_agentd.conf
+@@ -20,6 +20,8 @@
+ # Default:
+ # LogType=file
+ 
++LogType=console
++
+ ### Option: LogFile
+ #	Log file name for LogType 'file' parameter.
+ #
+@@ -52,6 +54,8 @@ LogFile=/tmp/zabbix_agentd.log
+ # Default:
+ # DebugLevel=3
+ 
++DebugLevel=4
++
+ ### Option: SourceIP
+ #	Source IP address for outgoing connections.
+ #
+@@ -250,6 +254,16 @@ Hostname=Zabbix server
+ # Default:
+ # User=zabbix
+ 
++### Option: RootFilesystem
++#	Use custom path for root filesystem (rootfs) to access host system metrics (/proc, /etc, /sys) and  files (log checks).
++#	Only needed when the agent is running inside a container/jail environment and you need to mount the host rootfs to access all files. 
++#
++# Mandatory: no
++# Default:
++# RootFilesystem=/
++
++RootFilesystem=/home/boris/Projects/cpp/zabbix
++
+ ### Option: Include
+ #	You may include individual files or all files in a directory in the configuration file.
+ #	Installing Zabbix will create include directory in /usr/local/etc, unless modified during the compile time.
+diff --git a/configure.ac b/configure.ac
+index 6baee52784..98154394cd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1524,6 +1524,7 @@ case "x$ARCH" in
+ esac		
+ 
+ 
++
+ dnl *****************************************************************
+ dnl *                                                               *
+ dnl *                 Output configuration results                  *
+diff --git a/include/common.h b/include/common.h
+index 8ad1577144..e826e07900 100644
+--- a/include/common.h
++++ b/include/common.h
+@@ -70,6 +70,10 @@
+ #define ON	1
+ #define OFF	0
+ 
++#ifndef _WINDOWS
++extern char *CONFIG_ROOT_FILESYSTEM;
++#endif
++
+ #if defined(_WINDOWS)
+ #	define	ZBX_SERVICE_NAME_LEN	64
+ extern char ZABBIX_SERVICE_NAME[ZBX_SERVICE_NAME_LEN];
+@@ -762,18 +766,6 @@ do				\
+ }				\
+ while (0)
+ 
+-#define zbx_fclose(file)	\
+-				\
+-do				\
+-{				\
+-	if (file)		\
+-	{			\
+-		fclose(file);	\
+-		file = NULL;	\
+-	}			\
+-}				\
+-while (0)
+-
+ #define THIS_SHOULD_NEVER_HAPPEN	zbx_error("ERROR [file:%s,line:%d] "				\
+ 							"Something impossible has just happened.",	\
+ 							__FILE__, __LINE__)
+@@ -1135,15 +1127,26 @@ zbx_uint64_t	suffix2factor(char c);
+ 
+ #if defined(_WINDOWS)
+ typedef struct __stat64	zbx_stat_t;
+-int	__zbx_stat(const char *path, zbx_stat_t *buf);
+-int	__zbx_open(const char *pathname, int flags);
+ #else
+ typedef struct stat	zbx_stat_t;
+ #endif	/* _WINDOWS */
+ 
++int		zbx_stat(const char *path, zbx_stat_t *buf);
++int		zbx_open(const char *pathname, int flags);
++int		zbx_close(int fd);
++#ifndef _WINDOWS
++DIR*	zbx_opendir(const char *name);
++int		zbx_closedir(DIR *dirp);
++struct dirent *zbx_readdir(DIR *dirp);
++#endif
++FILE* 	zbx_fopen(const char *pathname, const char *mode);
++int		zbx_fclose(FILE *file);
+ void	find_cr_lf_szbyte(const char *encoding, const char **cr, const char **lf, size_t *szbyte);
+-int	zbx_read(int fd, char *buf, size_t count, const char *encoding);
+-int	zbx_is_regular_file(const char *path);
++int		zbx_read(int fd, char *buf, size_t count, const char *encoding);
++int		zbx_is_regular_file(const char *path);
++#ifndef _WINDOWS
++void	zbx_rootfs_path(char *dst, size_t count, const char *path);
++#endif
+ 
+ int	MAIN_ZABBIX_ENTRY(int flags);
+ 
+diff --git a/include/zbxtypes.h b/include/zbxtypes.h
+index 38cc3df254..4f55e6204c 100644
+--- a/include/zbxtypes.h
++++ b/include/zbxtypes.h
+@@ -34,9 +34,6 @@
+ #if defined(_WINDOWS)
+ #	include <strsafe.h>
+ 
+-#	define zbx_stat(path, buf)		__zbx_stat(path, buf)
+-#	define zbx_open(pathname, flags)	__zbx_open(pathname, flags | O_BINARY)
+-
+ #	ifndef __UINT64_C
+ #		define __UINT64_C(x)	x
+ #	endif
+@@ -76,9 +73,6 @@ typedef __int64	zbx_offset_t;
+ 
+ #else	/* _WINDOWS */
+ 
+-#	define zbx_stat(path, buf)		stat(path, buf)
+-#	define zbx_open(pathname, flags)	open(pathname, flags)
+-
+ #	ifndef __UINT64_C
+ #		ifdef UINT64_C
+ #			define __UINT64_C(c)	(UINT64_C(c))
+diff --git a/src/libs/zbxcommon/file.c b/src/libs/zbxcommon/file.c
+index a7ed80ca1c..2b488cb9e4 100644
+--- a/src/libs/zbxcommon/file.c
++++ b/src/libs/zbxcommon/file.c
+@@ -18,21 +18,182 @@
+ **/
+ 
+ #include "common.h"
++#include "log.h"
+ 
+-#if defined(_WINDOWS)
+-int	__zbx_open(const char *pathname, int flags)
++#ifndef _WINDOWS
++char	*CONFIG_ROOT_FILESYSTEM;
++#endif
++
++#ifdef _WINDOWS
++
++int	zbx_stat(const char *path, zbx_stat_t *buf)
++{
++	int	ret, fd;
++	wchar_t	*wpath;
++
++	wpath = zbx_utf8_to_unicode(path);
++
++	if (-1 == (ret = _wstat64(wpath, buf)))
++		goto out;
++
++	if (0 != S_ISDIR(buf->st_mode) || 0 != buf->st_size)
++		goto out;
++
++	/* In the case of symlinks _wstat64 returns zero file size.   */
++	/* Try to work around it by opening the file and using fstat. */
++
++	ret = -1;
++
++	if (-1 != (fd = _wopen(wpath, O_RDONLY)))
++	{
++		ret = _fstat64(fd, buf);
++		_close(fd);
++	}
++out:
++	zbx_free(wpath);
++
++	return ret;
++}
++
++#else
++
++int	zbx_stat(const char *path, zbx_stat_t *buf)
++{
++	int ret;
++
++	ret = stat(path, buf);
++
++	return ret;
++}
++
++#endif
++
++#ifdef _WINDOWS
++
++int	zbx_open(const char *pathname, int flags)
+ {
+ 	int	ret;
+ 	wchar_t	*wpathname;
+ 
+ 	wpathname = zbx_utf8_to_unicode(pathname);
+-	ret = _wopen(wpathname, flags);
++	ret = _wopen(wpathname, flags | O_BINARY);
+ 	zbx_free(wpathname);
+ 
+ 	return ret;
+ }
++
++#else
++
++int	zbx_open(const char *pathname, int flags)
++{
++	int ret;
++
++	ret = open(pathname, flags);
++
++	return ret;
++}
++#endif
++
++#ifdef _WINDOWS
++
++int	zbx_close(int fd)
++{
++	int ret;
++
++	ret = _close(fd);
++
++	return ret;
++}
++
++#else
++
++int	zbx_close(int fd)
++{
++	int ret;
++
++	ret = close(fd);
++
++	return ret;
++}
++
++#endif
++
++#if !defined(_WINDOWS)
++
++DIR*	zbx_opendir(const char *name)
++{
++	DIR* dir;
++
++	dir = opendir(name);
++
++	return dir;
++}
++
++int	zbx_closedir(DIR *dirp)
++{
++	int ret;
++
++	ret = closedir(dirp);
++
++	return ret;
++}
++
++
++struct dirent*	zbx_readdir(DIR *dirp)
++{
++	struct dirent	*d_ent;
++
++	d_ent = readdir(dirp);
++
++	return d_ent;
++}
++
++#endif
++
++#ifdef _WINDOWS
++
++FILE*	zbx_fopen(const char *pathname, const char *mode)
++{
++	FILE*	fd;
++	wchar_t	*pathname;
++	wchar_t	*wmode;
++
++	wpathname = zbx_utf8_to_unicode(path);
++	wmode = zbx_utf8_to_unicode(mode);
++	fd = _wfopen(wpathname, wmode);
++
++	zbx_free(wpathname);
++	zbx_free(wmode);
++
++	return fd;
++}
++
++#else
++
++FILE*	zbx_fopen(const char *pathname, const char *mode)
++{
++	FILE* fd;
++
++	fd = fopen(pathname, mode);
++
++	return fd;
++}
++
+ #endif
+ 
++int	zbx_fclose(FILE *file)
++{
++	int ret=0;
++
++	if (file)
++	{
++	    ret = fclose(file);
++	    file = NULL;
++	}
++
++	return ret;
++}
++
+ void	find_cr_lf_szbyte(const char *encoding, const char **cr, const char **lf, size_t *szbyte)
+ {
+ 	/* default is single-byte character set */
+@@ -153,3 +314,21 @@ int	zbx_is_regular_file(const char *path)
+ 
+ 	return FAIL;
+ }
++
++#ifndef _WINDOWS
++
++void	zbx_rootfs_path(char *dst, size_t size, const char *path)
++{
++	if ((CONFIG_ROOT_FILESYSTEM == NULL) || (strcmp(CONFIG_ROOT_FILESYSTEM, "/") == 0))
++	{
++		zbx_snprintf(dst, size, "%s", path);
++	}
++	else
++	{
++		zbx_snprintf(dst, size, "%s%s", CONFIG_ROOT_FILESYSTEM, path);
++
++		zabbix_log(LOG_LEVEL_DEBUG, "Rootfs path converted: \"%s\" -> \"%s\"", path, dst);
++	}
++}
++
++#endif
+diff --git a/src/libs/zbxcommon/misc.c b/src/libs/zbxcommon/misc.c
+index 6f5d5a8d58..c1ab252ee1 100644
+--- a/src/libs/zbxcommon/misc.c
++++ b/src/libs/zbxcommon/misc.c
+@@ -59,34 +59,6 @@ static ZBX_THREAD_LOCAL volatile sig_atomic_t	zbx_timed_out;	/* 0 - no timeout o
+ char	ZABBIX_SERVICE_NAME[ZBX_SERVICE_NAME_LEN] = APPLICATION_NAME;
+ char	ZABBIX_EVENT_SOURCE[ZBX_SERVICE_NAME_LEN] = APPLICATION_NAME;
+ 
+-int	__zbx_stat(const char *path, zbx_stat_t *buf)
+-{
+-	int	ret, fd;
+-	wchar_t	*wpath;
+-
+-	wpath = zbx_utf8_to_unicode(path);
+-
+-	if (-1 == (ret = _wstat64(wpath, buf)))
+-		goto out;
+-
+-	if (0 != S_ISDIR(buf->st_mode) || 0 != buf->st_size)
+-		goto out;
+-
+-	/* In the case of symlinks _wstat64 returns zero file size.   */
+-	/* Try to work around it by opening the file and using fstat. */
+-
+-	ret = -1;
+-
+-	if (-1 != (fd = _wopen(wpath, O_RDONLY)))
+-	{
+-		ret = _fstat64(fd, buf);
+-		_close(fd);
+-	}
+-out:
+-	zbx_free(wpath);
+-
+-	return ret;
+-}
+ 
+ #endif
+ 
+diff --git a/src/libs/zbxconf/cfg.c b/src/libs/zbxconf/cfg.c
+index d2e8cc0162..cd675a18cf 100644
+--- a/src/libs/zbxconf/cfg.c
++++ b/src/libs/zbxconf/cfg.c
+@@ -266,13 +266,13 @@ static int	parse_cfg_dir(const char *path, const char *pattern, struct cfg_line
+ 	char		*file = NULL;
+ 	int		ret = FAIL;
+ 
+-	if (NULL == (dir = opendir(path)))
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+ 		zbx_error("%s: %s", path, zbx_strerror(errno));
+ 		goto out;
+ 	}
+ 
+-	while (NULL != (d = readdir(dir)))
++	while (NULL != (d = zbx_readdir(dir)))
+ 	{
+ 		file = zbx_dsprintf(file, "%s/%s", path, d->d_name);
+ 
+@@ -288,7 +288,7 @@ static int	parse_cfg_dir(const char *path, const char *pattern, struct cfg_line
+ 
+ 	ret = SUCCEED;
+ close:
+-	if (0 != closedir(dir))
++	if (0 != zbx_closedir(dir))
+ 	{
+ 		zbx_error("%s: %s", path, zbx_strerror(errno));
+ 		ret = FAIL;
+@@ -391,17 +391,9 @@ static int	__parse_cfg_file(const char *cfg_file, struct cfg_line *cfg, int leve
+ 
+ 	if (NULL != cfg_file)
+ 	{
+-#ifdef _WINDOWS
+-		wcfg_file = zbx_utf8_to_unicode(cfg_file);
+-		file = _wfopen(wcfg_file, L"r");
+-		zbx_free(wcfg_file);
+-
+-		if (NULL == file)
+-			goto cannot_open;
+-#else
+-		if (NULL == (file = fopen(cfg_file, "r")))
++		if (NULL == (file = zbx_fopen(cfg_file, "r")))
+ 			goto cannot_open;
+-#endif
++
+ 		for (lineno = 1; NULL != fgets(line, sizeof(line), file); lineno++)
+ 		{
+ 			/* check if line length exceeds limit (max. 2048 bytes) */
+@@ -434,7 +426,7 @@ static int	__parse_cfg_file(const char *cfg_file, struct cfg_line *cfg, int leve
+ 			{
+ 				if (FAIL == parse_cfg_object(value, cfg, level, strict))
+ 				{
+-					fclose(file);
++					zbx_fclose(file);
+ 					goto error;
+ 				}
+ 
+@@ -491,7 +483,7 @@ static int	__parse_cfg_file(const char *cfg_file, struct cfg_line *cfg, int leve
+ 			if (0 == param_valid && ZBX_CFG_STRICT == strict)
+ 				goto unknown_parameter;
+ 		}
+-		fclose(file);
++		zbx_fclose(file);
+ 	}
+ 
+ 	if (1 != level)	/* skip mandatory parameters check for included files */
+@@ -525,24 +517,24 @@ cannot_open:
+ 	zbx_error("cannot open config file \"%s\": %s", cfg_file, zbx_strerror(errno));
+ 	goto error;
+ line_too_long:
+-	fclose(file);
++	zbx_fclose(file);
+ 	zbx_error("line %d exceeds %d byte length limit in config file \"%s\"", lineno, MAX_STRING_LEN, cfg_file);
+ 	goto error;
+ non_utf8:
+-	fclose(file);
++	zbx_fclose(file);
+ 	zbx_error("non-UTF-8 character at line %d \"%s\" in config file \"%s\"", lineno, line, cfg_file);
+ 	goto error;
+ non_key_value:
+-	fclose(file);
++	zbx_fclose(file);
+ 	zbx_error("invalid entry \"%s\" (not following \"parameter=value\" notation) in config file \"%s\", line %d",
+ 			line, cfg_file, lineno);
+ 	goto error;
+ incorrect_config:
+-	fclose(file);
++	zbx_fclose(file);
+ 	zbx_error("wrong value of \"%s\" in config file \"%s\", line %d", cfg[i].parameter, cfg_file, lineno);
+ 	goto error;
+ unknown_parameter:
+-	fclose(file);
++	zbx_fclose(file);
+ 	zbx_error("unknown parameter \"%s\" in config file \"%s\", line %d", parameter, cfg_file, lineno);
+ 	goto error;
+ missing_mandatory:
+diff --git a/src/libs/zbxcrypto/tls.c b/src/libs/zbxcrypto/tls.c
+index aa9486567e..f6a67a786b 100644
+--- a/src/libs/zbxcrypto/tls.c
++++ b/src/libs/zbxcrypto/tls.c
+@@ -1538,7 +1538,7 @@ static void	zbx_read_psk_file(void)
+ 							/* 1 byte for terminating '\0' */
+ 	char		buf_bin[HOST_TLS_PSK_LEN / 2];	/* up to 256 bytes of binary PSK */
+ 
+-	if (NULL == (f = fopen(CONFIG_TLS_PSK_FILE, "r")))
++	if (NULL == (f = zbx_fopen(CONFIG_TLS_PSK_FILE, "r")))
+ 	{
+ 		zabbix_log(LOG_LEVEL_CRIT, "cannot open file \"%s\": %s", CONFIG_TLS_PSK_FILE, zbx_strerror(errno));
+ 		goto out;
+diff --git a/src/libs/zbxicmpping/icmpping.c b/src/libs/zbxicmpping/icmpping.c
+index 3e1fd85d56..0a118a5277 100644
+--- a/src/libs/zbxicmpping/icmpping.c
++++ b/src/libs/zbxicmpping/icmpping.c
+@@ -226,7 +226,7 @@ static int	process_ping(ZBX_FPING_HOST *hosts, int hosts_count, int count, int i
+ 	zbx_snprintf(tmp, sizeof(tmp), "%s %s 2>&1 <%s", CONFIG_FPING_LOCATION, params, filename);
+ #endif	/* HAVE_IPV6 */
+ 
+-	if (NULL == (f = fopen(filename, "w")))
++	if (NULL == (f = zbx_fopen(filename, "w")))
+ 	{
+ 		zbx_snprintf(error, max_error_len, "%s: %s", filename, zbx_strerror(errno));
+ 		return ret;
+@@ -240,7 +240,7 @@ static int	process_ping(ZBX_FPING_HOST *hosts, int hosts_count, int count, int i
+ 		fprintf(f, "%s\n", hosts[i].addr);
+ 	}
+ 
+-	fclose(f);
++	zbx_fclose(f);
+ 
+ 	zabbix_log(LOG_LEVEL_DEBUG, "%s", tmp);
+ 
+diff --git a/src/libs/zbxlog/log.c b/src/libs/zbxlog/log.c
+index 44b2fed251..6b32c97fe4 100644
+--- a/src/libs/zbxlog/log.c
++++ b/src/libs/zbxlog/log.c
+@@ -122,7 +122,7 @@ void	zbx_redirect_stdio(const char *filename)
+ 
+ 	close(fd);
+ 
+-	if (-1 == (fd = open(default_file, O_RDONLY)))
++	if (-1 == (fd = zbx_open(default_file, O_RDONLY)))
+ 	{
+ 		zbx_error("cannot open \"%s\": %s", default_file, zbx_strerror(errno));
+ 		exit(EXIT_FAILURE);
+@@ -169,7 +169,7 @@ static void	rotate_log(const char *filename)
+ 		{
+ 			FILE	*log_file = NULL;
+ 
+-			if (NULL != (log_file = fopen(filename, "w")))
++			if (NULL != (log_file = zbx_fopen(filename, "w")))
+ 			{
+ 				long		milliseconds;
+ 				struct tm	tm;
+@@ -302,7 +302,7 @@ int	zabbix_open_log(int type, int level, const char *filename)
+ 			exit(EXIT_FAILURE);
+ 		}
+ 
+-		if (NULL == (log_file = fopen(filename, "a+")))
++		if (NULL == (log_file = zbx_fopen(filename, "a+")))
+ 		{
+ 			zbx_error("unable to open log file [%s]: %s", filename, zbx_strerror(errno));
+ 			exit(EXIT_FAILURE);
+@@ -424,7 +424,7 @@ void	__zbx_zabbix_log(int level, const char *fmt, ...)
+ 
+ 		rotate_log(log_filename);
+ 
+-		if (NULL != (log_file = fopen(log_filename, "a+")))
++		if (NULL != (log_file = zbx_fopen(log_filename, "a+")))
+ 		{
+ 			long		milliseconds;
+ 			struct tm	tm;
+diff --git a/src/libs/zbxnix/fatal.c b/src/libs/zbxnix/fatal.c
+index f245d2f8ce..00c3b774f4 100644
+--- a/src/libs/zbxnix/fatal.c
++++ b/src/libs/zbxnix/fatal.c
+@@ -315,7 +315,7 @@ void	print_fatal_info(void *context)
+ 
+ 	zabbix_log(LOG_LEVEL_CRIT, "=== Memory map: ===");
+ 
+-	if (NULL != (fd = fopen("/proc/self/maps", "r")))
++	if (NULL != (fd = zbx_fopen("/proc/self/maps", "r")))
+ 	{
+ 		char line[1024];
+ 
+diff --git a/src/libs/zbxnix/pid.c b/src/libs/zbxnix/pid.c
+index e135372e6e..064cd201c0 100644
+--- a/src/libs/zbxnix/pid.c
++++ b/src/libs/zbxnix/pid.c
+@@ -39,7 +39,7 @@ int	create_pid_file(const char *pidfile)
+ 	/* check if pid file already exists */
+ 	if (0 == zbx_stat(pidfile, &buf))
+ 	{
+-		if (-1 == (fd = open(pidfile, O_WRONLY | O_APPEND)))
++		if (-1 == (fd = zbx_open(pidfile, O_WRONLY | O_APPEND)))
+ 		{
+ 			zbx_error("cannot open PID file [%s]: %s", pidfile, zbx_strerror(errno));
+ 			return FAIL;
+@@ -47,17 +47,17 @@ int	create_pid_file(const char *pidfile)
+ 
+ 		if (-1 == fcntl(fd, F_SETLK, &fl))
+ 		{
+-			close(fd);
++			zbx_close(fd);
+ 			zbx_error("Is this process already running? Could not lock PID file [%s]: %s",
+ 					pidfile, zbx_strerror(errno));
+ 			return FAIL;
+ 		}
+ 
+-		close(fd);
++		zbx_close(fd);
+ 	}
+ 
+ 	/* open pid file */
+-	if (NULL == (fpid = fopen(pidfile, "w")))
++	if (NULL == (fpid = zbx_fopen(pidfile, "w")))
+ 	{
+ 		zbx_error("cannot create PID file [%s]: %s", pidfile, zbx_strerror(errno));
+ 		return FAIL;
+@@ -82,7 +82,7 @@ int	read_pid_file(const char *pidfile, pid_t *pid, char *error, size_t max_error
+ 	int	ret = FAIL;
+ 	FILE	*fpid;
+ 
+-	if (NULL == (fpid = fopen(pidfile, "r")))
++	if (NULL == (fpid = zbx_fopen(pidfile, "r")))
+ 	{
+ 		zbx_snprintf(error, max_error_len, "cannot open PID file [%s]: %s", pidfile, zbx_strerror(errno));
+ 		return ret;
+diff --git a/src/libs/zbxsysinfo/common/file.c b/src/libs/zbxsysinfo/common/file.c
+index 94214377fa..aadc2d6b33 100644
+--- a/src/libs/zbxsysinfo/common/file.c
++++ b/src/libs/zbxsysinfo/common/file.c
+@@ -30,6 +30,9 @@ extern int	CONFIG_TIMEOUT;
+ 
+ int	VFS_FILE_SIZE(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	zbx_stat_t	buf;
+ 	char		*filename;
+ 	int		ret = SYSINFO_RET_FAIL;
+@@ -48,7 +51,14 @@ int	VFS_FILE_SIZE(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (0 != zbx_stat(filename, &buf))
++
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain file information: %s", zbx_strerror(errno)));
+ 		goto err;
+@@ -63,6 +73,9 @@ err:
+ 
+ int	VFS_FILE_TIME(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	zbx_stat_t	buf;
+ 	char		*filename, *type;
+ 	int		ret = SYSINFO_RET_FAIL;
+@@ -82,6 +95,12 @@ int	VFS_FILE_TIME(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (0 != zbx_stat(filename, &buf))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain file information: %s", zbx_strerror(errno)));
+@@ -107,6 +126,9 @@ err:
+ 
+ int	VFS_FILE_EXISTS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	zbx_stat_t	buf;
+ 	char		*filename;
+ 	int		ret = SYSINFO_RET_FAIL, file_exists;
+@@ -125,6 +147,12 @@ int	VFS_FILE_EXISTS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (0 == zbx_stat(filename, &buf))
+ 	{
+ 		file_exists = S_ISREG(buf.st_mode) ? 1 : 0;
+@@ -147,6 +175,9 @@ err:
+ 
+ int	VFS_FILE_CONTENTS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	char		*filename, *tmp, encoding[32];
+ 	char		read_buf[MAX_BUFFER_LEN], *utf8, *contents = NULL;
+ 	size_t		contents_alloc = 0, contents_offset = 0;
+@@ -176,6 +207,12 @@ int	VFS_FILE_CONTENTS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (0 != zbx_stat(filename, &stat_buf))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain file information: %s", zbx_strerror(errno)));
+@@ -248,13 +285,16 @@ int	VFS_FILE_CONTENTS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ret = SYSINFO_RET_OK;
+ err:
+ 	if (-1 != f)
+-		close(f);
++		zbx_close(f);
+ 
+ 	return ret;
+ }
+ 
+ int	VFS_FILE_REGEXP(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	char		*filename, *regexp, encoding[32], *output, *start_line_str, *end_line_str;
+ 	char		buf[MAX_BUFFER_LEN], *utf8, *tmp, *ptr = NULL;
+ 	int		nbytes, f = -1, ret = SYSINFO_RET_FAIL;
+@@ -315,6 +355,12 @@ int	VFS_FILE_REGEXP(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (-1 == (f = zbx_open(filename, O_RDONLY)))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open file: %s", zbx_strerror(errno)));
+@@ -369,13 +415,16 @@ int	VFS_FILE_REGEXP(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ret = SYSINFO_RET_OK;
+ err:
+ 	if (-1 != f)
+-		close(f);
++		zbx_close(f);
+ 
+ 	return ret;
+ }
+ 
+ int	VFS_FILE_REGMATCH(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	char		*filename, *regexp, *tmp, encoding[32];
+ 	char		buf[MAX_BUFFER_LEN], *utf8, *start_line_str, *end_line_str;
+ 	int		nbytes, res, f = -1, ret = SYSINFO_RET_FAIL;
+@@ -435,6 +484,12 @@ int	VFS_FILE_REGMATCH(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (-1 == (f = zbx_open(filename, O_RDONLY)))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open file: %s", zbx_strerror(errno)));
+@@ -481,13 +536,16 @@ int	VFS_FILE_REGMATCH(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ret = SYSINFO_RET_OK;
+ err:
+ 	if (-1 != f)
+-		close(f);
++		zbx_close(f);
+ 
+ 	return ret;
+ }
+ 
+ int	VFS_FILE_MD5SUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	char		*filename;
+ 	int		i, nbytes, f = -1, ret = SYSINFO_RET_FAIL;
+ 	md5_state_t	state;
+@@ -513,6 +571,12 @@ int	VFS_FILE_MD5SUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (-1 == (f = zbx_open(filename, O_RDONLY)))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open file: %s", zbx_strerror(errno)));
+@@ -561,7 +625,7 @@ int	VFS_FILE_MD5SUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ret = SYSINFO_RET_OK;
+ err:
+ 	if (-1 != f)
+-		close(f);
++		zbx_close(f);
+ 
+ 	return ret;
+ }
+@@ -629,6 +693,9 @@ static u_long	crctab[] =
+  ******************************************************************************/
+ int	VFS_FILE_CKSUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++#ifndef _WINDOWS
++	char		path[MAX_STRING_LEN];
++#endif
+ 	char		*filename;
+ 	int		i, nr, f = -1, ret = SYSINFO_RET_FAIL;
+ 	zbx_uint32_t	crc, flen;
+@@ -652,6 +719,12 @@ int	VFS_FILE_CKSUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		goto err;
+ 	}
+ 
++#ifndef _WINDOWS
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	filename = path;
++#endif
++
+ 	if (-1 == (f = zbx_open(filename, O_RDONLY)))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open file: %s", zbx_strerror(errno)));
+@@ -697,7 +770,7 @@ int	VFS_FILE_CKSUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ret = SYSINFO_RET_OK;
+ err:
+ 	if (-1 != f)
+-		close(f);
++		zbx_close(f);
+ 
+ 	return ret;
+ }
+diff --git a/src/libs/zbxsysinfo/hpux/net.c b/src/libs/zbxsysinfo/hpux/net.c
+index 367fbf4f02..478e9ab768 100644
+--- a/src/libs/zbxsysinfo/hpux/net.c
++++ b/src/libs/zbxsysinfo/hpux/net.c
+@@ -110,7 +110,7 @@ static int	get_if_names(char **if_list, size_t *if_list_alloc, size_t *if_list_o
+ 	}
+ next:
+ 	zbx_free(buffer);
+-	close(s);
++	zbx_close(s);
+ 
+ #if defined (SIOCGLIFCONF)
+ 	family = AF_INET6;
+@@ -121,7 +121,7 @@ next:
+ 	i = ioctl(s, SIOCGLIFNUM, (char *)&numifs);
+ 	if (0 == numifs)
+ 	{
+-		close(s);
++		zbx_close(s);
+ 		return SUCCEED;
+ 	}
+ 
+@@ -144,7 +144,7 @@ next:
+ 	}
+ end:
+ 	zbx_free(buffer);
+-	close(s);
++	zbx_close(s);
+ #endif
+ 	return SUCCEED;
+ }
+@@ -386,12 +386,12 @@ static int	get_net_stat(Ext_mib_t *mib, const char *if_name)
+ {
+ 	int	fd, ppa;
+ 
+-	if (-1 == (fd = open("/dev/dlpi", O_RDWR)))
++	if (-1 == (fd = zbx_open("/dev/dlpi", O_RDWR)))
+ 		return FAIL;
+ 
+ 	if (FAIL == get_ppa(fd, if_name, &ppa))
+ 	{
+-		close(fd);
++		zbx_close(fd);
+ 		return FAIL;
+ 	}
+ 
+@@ -403,7 +403,7 @@ static int	get_net_stat(Ext_mib_t *mib, const char *if_name)
+ 
+ 	dlpi_detach(fd);
+ 
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	return SUCCEED;
+ }
+diff --git a/src/libs/zbxsysinfo/linux/boottime.c b/src/libs/zbxsysinfo/linux/boottime.c
+index 9452bc7afa..7b0f3f1fdc 100644
+--- a/src/libs/zbxsysinfo/linux/boottime.c
++++ b/src/libs/zbxsysinfo/linux/boottime.c
+@@ -23,6 +23,7 @@
+ 
+ int	SYSTEM_BOOTTIME(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 	char		buf[MAX_STRING_LEN];
+ 	int		ret = SYSINFO_RET_FAIL;
+@@ -30,9 +31,11 @@ int	SYSTEM_BOOTTIME(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/stat");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return ret;
+ 	}
+ 
+@@ -51,7 +54,7 @@ int	SYSTEM_BOOTTIME(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"btime\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"btime\" in %s.", path));
+ 
+ 	return ret;
+ }
+diff --git a/src/libs/zbxsysinfo/linux/cpu.c b/src/libs/zbxsysinfo/linux/cpu.c
+index 497cb658cf..e15df89583 100644
+--- a/src/libs/zbxsysinfo/linux/cpu.c
++++ b/src/libs/zbxsysinfo/linux/cpu.c
+@@ -192,13 +192,16 @@ int     SYSTEM_CPU_SWITCHES(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	int		ret = SYSINFO_RET_FAIL;
+ 	char		line[MAX_STRING_LEN];
+ 	zbx_uint64_t	value = 0;
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/stat");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -217,7 +220,7 @@ int     SYSTEM_CPU_SWITCHES(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"ctxt\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"ctxt\" in %s.", path));
+ 
+ 	return ret;
+ }
+@@ -227,13 +230,14 @@ int     SYSTEM_CPU_INTR(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	int		ret = SYSINFO_RET_FAIL;
+ 	char		line[MAX_STRING_LEN];
+ 	zbx_uint64_t	value = 0;
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 
+-	ZBX_UNUSED(request);
++	zbx_rootfs_path(path, sizeof(path), "/proc/stat");
+ 
+-	if (NULL == (f = fopen("/proc/stat", "r")))
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/stat: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -252,7 +256,7 @@ int     SYSTEM_CPU_INTR(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	zbx_fclose(f);
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot find a line with \"intr\" in /proc/stat."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find a line with \"intr\" in %s.", path));
+ 
+ 	return ret;
+ }
+diff --git a/src/libs/zbxsysinfo/linux/diskio.c b/src/libs/zbxsysinfo/linux/diskio.c
+index b9ff5f2bed..a088233fd3 100644
+--- a/src/libs/zbxsysinfo/linux/diskio.c
++++ b/src/libs/zbxsysinfo/linux/diskio.c
+@@ -91,7 +91,7 @@ int	get_diskstat(const char *devname, zbx_uint64_t *dstat)
+ 			dev_exists = SUCCEED;
+ 	}
+ 
+-	if (NULL == (f = fopen(INFO_FILE_NAME, "r")))
++	if (NULL == (f = zbx_fopen(INFO_FILE_NAME, "r")))
+ 		return FAIL;
+ 
+ 	while (NULL != fgets(tmp, sizeof(tmp), f))
+@@ -150,7 +150,7 @@ static int	get_kernel_devname(const char *devname, char *kernel_devname, size_t
+ 		strscpy(dev_path, ZBX_DEV_PFX);
+ 	strscat(dev_path, devname);
+ 
+-	if (zbx_stat(dev_path, &dev_st) < 0 || NULL == (f = fopen(INFO_FILE_NAME, "r")))
++	if (zbx_stat(dev_path, &dev_st) < 0 || NULL == (f = zbx_fopen(INFO_FILE_NAME, "r")))
+ 		return ret;
+ 
+ 	while (NULL != fgets(tmp, sizeof(tmp), f))
+diff --git a/src/libs/zbxsysinfo/linux/diskspace.c b/src/libs/zbxsysinfo/linux/diskspace.c
+index 442df505a3..f46d6f8c89 100644
+--- a/src/libs/zbxsysinfo/linux/diskspace.c
++++ b/src/libs/zbxsysinfo/linux/diskspace.c
+@@ -127,14 +127,17 @@ int	VFS_FS_SIZE(AGENT_REQUEST *request, AGENT_RESULT *result)
+ int	VFS_FS_DISCOVERY(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
+ 	char		line[MAX_STRING_LEN], *p, *mpoint, *mtype;
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 	struct zbx_json	j;
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/mounts", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/mounts");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/mounts: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+diff --git a/src/libs/zbxsysinfo/linux/hardware.c b/src/libs/zbxsysinfo/linux/hardware.c
+index 9f3d8d0205..c18e35c5a2 100644
+--- a/src/libs/zbxsysinfo/linux/hardware.c
++++ b/src/libs/zbxsysinfo/linux/hardware.c
+@@ -115,7 +115,7 @@ static int	get_dmi_info(char *buf, int bufsize, int flags)
+ 		if (-1 == (ssize_t)(smbios_len = read(fd, smbuf, file_buf.st_size)))
+ 			goto clean;
+ 	}
+-	else if (-1 != (fd = open(DEV_MEM, O_RDONLY)))
++	else if (-1 != (fd = zbx_open(DEV_MEM, O_RDONLY)))
+ 	{
+ 		if (SMBIOS_STATUS_UNKNOWN == smbios_status)	/* look for SMBIOS table only once */
+ 		{
+@@ -210,7 +210,7 @@ static int	get_dmi_info(char *buf, int bufsize, int flags)
+ clean:
+ 	zbx_free(smbuf);
+ close:
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	return ret;
+ }
+@@ -263,14 +263,14 @@ static zbx_uint64_t	get_cpu_max_freq(int cpu_num)
+ 
+ 	zbx_snprintf(filename, sizeof(filename), CPU_MAX_FREQ_FILE, cpu_num);
+ 
+-	f = fopen(filename, "r");
++	f = zbx_fopen(filename, "r");
+ 
+ 	if (NULL != f)
+ 	{
+ 		if (1 != fscanf(f, ZBX_FS_UI64, &freq))
+ 			freq = FAIL;
+ 
+-		fclose(f);
++		zbx_fclose(f);
+ 	}
+ 
+ 	return freq;
+@@ -347,7 +347,7 @@ int     SYSTEM_HW_CPU(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	if (NULL == (f = fopen(HW_CPU_INFO_FILE, "r")))
++	if (NULL == (f = zbx_fopen(HW_CPU_INFO_FILE, "r")))
+ 	{
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open " HW_CPU_INFO_FILE ": %s", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+@@ -479,7 +479,7 @@ int     SYSTEM_HW_MACADDR(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	ifc.ifc_buf = buffer;
+ 	if (-1 == ioctl(s, SIOCGIFCONF, &ifc))
+ 	{
+-		close(s);
++		zbx_close(s);
+ 		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot set socket parameters: %s", zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+@@ -541,7 +541,7 @@ int     SYSTEM_HW_MACADDR(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	SET_STR_RESULT(result, zbx_strdup(NULL, buffer));
+ 
+ 	zbx_vector_str_destroy(&addresses);
+-	close(s);
++	zbx_close(s);
+ 
+ 	return SYSINFO_RET_OK;
+ }
+diff --git a/src/libs/zbxsysinfo/linux/kernel.c b/src/libs/zbxsysinfo/linux/kernel.c
+index 11b8f8b557..a50f019fd9 100644
+--- a/src/libs/zbxsysinfo/linux/kernel.c
++++ b/src/libs/zbxsysinfo/linux/kernel.c
+@@ -26,7 +26,7 @@ static int	read_uint64_from_procfs(const char *path, zbx_uint64_t *value)
+ 	char	line[MAX_STRING_LEN];
+ 	FILE	*f;
+ 
+-	if (NULL != (f = fopen(path, "r")))
++	if (NULL != (f = zbx_fopen(path, "r")))
+ 	{
+ 		if (NULL != fgets(line, sizeof(line), f))
+ 		{
+@@ -41,13 +41,16 @@ static int	read_uint64_from_procfs(const char *path, zbx_uint64_t *value)
+ 
+ int	KERNEL_MAXFILES(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char			path[MAX_STRING_LEN];
+ 	zbx_uint64_t	value;
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (SYSINFO_RET_FAIL == read_uint64_from_procfs("/proc/sys/fs/file-max", &value))
++	zbx_rootfs_path(path, sizeof(path), "/proc/sys/fs/file-max");
++
++	if (SYSINFO_RET_FAIL == read_uint64_from_procfs(path, &value))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain data from /proc/sys/fs/file-max."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain data from %s.", path));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -57,13 +60,16 @@ int	KERNEL_MAXFILES(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ int	KERNEL_MAXPROC(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char			path[MAX_STRING_LEN];
+ 	zbx_uint64_t	value;
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (SYSINFO_RET_FAIL == read_uint64_from_procfs("/proc/sys/kernel/pid_max", &value))
++	zbx_rootfs_path(path, sizeof(path), "/proc/sys/kernel/pid_max");
++
++	if (SYSINFO_RET_FAIL == read_uint64_from_procfs(path, &value))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain data from /proc/sys/kernel/pid_max."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain data from %s.", path));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+diff --git a/src/libs/zbxsysinfo/linux/memory.c b/src/libs/zbxsysinfo/linux/memory.c
+index 50589d4750..ca3e87895f 100644
+--- a/src/libs/zbxsysinfo/linux/memory.c
++++ b/src/libs/zbxsysinfo/linux/memory.c
+@@ -69,19 +69,22 @@ static int	VM_MEMORY_BUFFERS(AGENT_RESULT *result)
+ 
+ static int	VM_MEMORY_CACHED(AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 	zbx_uint64_t	value;
+ 	int		res;
+ 
+-	if (NULL == (f = fopen("/proc/meminfo", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/meminfo");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/meminfo: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "Cached:", NULL, &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of Cached from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of Cached from %s.", path));
+ 		goto close;
+ 	}
+ 
+@@ -133,6 +136,7 @@ static int	VM_MEMORY_PUSED(AGENT_RESULT *result)
+ 
+ static int	VM_MEMORY_AVAILABLE(AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 	zbx_uint64_t	value;
+ 	struct sysinfo	info;
+@@ -140,15 +144,17 @@ static int	VM_MEMORY_AVAILABLE(AGENT_RESULT *result)
+ 
+ 	/* try MemAvailable (present since Linux 3.14), falling back to a calculation based on sysinfo() and Cached */
+ 
+-	if (NULL == (f = fopen("/proc/meminfo", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/meminfo");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/meminfo: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "MemAvailable:", "Cached:", &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of MemAvailable from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of MemAvailable from %s.", path));
+ 		goto close;
+ 	}
+ 
+@@ -161,7 +167,7 @@ static int	VM_MEMORY_AVAILABLE(AGENT_RESULT *result)
+ 
+ 	if (FAIL == (res = byte_value_from_proc_file(f, "Cached:", NULL, &value)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot obtain the value of Cached from /proc/meminfo."));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot obtain the value of Cached from %s.", path));
+ 		goto close;
+ 	}
+ 
+diff --git a/src/libs/zbxsysinfo/linux/net.c b/src/libs/zbxsysinfo/linux/net.c
+index 53b49a7f09..bba7b0eb20 100644
+--- a/src/libs/zbxsysinfo/linux/net.c
++++ b/src/libs/zbxsysinfo/linux/net.c
+@@ -190,7 +190,7 @@ static int	find_tcp_port_by_state_nl(unsigned short port, int state, int *found)
+ 	}
+ out:
+ 	if (-1 != fd)
+-		close(fd);
++		zbx_close(fd);
+ 
+ 	if (NLERR_OK == nlerr)
+ 		ret = SUCCEED;
+@@ -203,6 +203,7 @@ static int	get_net_stat(const char *if_name, net_stat_t *result, char **error)
+ {
+ 	int	ret = SYSINFO_RET_FAIL;
+ 	char	line[MAX_STRING_LEN], name[MAX_STRING_LEN], *p;
++	char	path[MAX_STRING_LEN];
+ 	FILE	*f;
+ 
+ 	if (NULL == if_name || '\0' == *if_name)
+@@ -211,9 +212,11 @@ static int	get_net_stat(const char *if_name, net_stat_t *result, char **error)
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	if (NULL == (f = fopen("/proc/net/dev", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/net/dev");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		*error = zbx_dsprintf(NULL, "Cannot open /proc/net/dev: %s", zbx_strerror(errno));
++		*error = zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -251,7 +254,7 @@ static int	get_net_stat(const char *if_name, net_stat_t *result, char **error)
+ 
+ 	if (SYSINFO_RET_FAIL == ret)
+ 	{
+-		*error = zbx_strdup(NULL, "Cannot find information for this network interface in /proc/net/dev.");
++		*error = zbx_dsprintf(NULL, "Cannot find information for this network interface in %s.", path);
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -276,10 +279,13 @@ static int	get_net_stat(const char *if_name, net_stat_t *result, char **error)
+  ******************************************************************************/
+ static int    proc_read_tcp_listen(const char *filename, char **buffer, int *buffer_alloc)
+ {
++	char	path[MAX_STRING_LEN];
+ 	int     n, fd, ret = -1, offset = 0;
+-	char    *start, *end;
++	char	*start, *end;
++
++	zbx_rootfs_path(path, sizeof(path), filename);
+ 
+-	if (-1 == (fd = open(filename, O_RDONLY)))
++	if (-1 == (fd = zbx_open(path, O_RDONLY)))
+ 		return -1;
+ 
+ 	while (0 != (n = read(fd, *buffer + offset, *buffer_alloc - offset)))
+@@ -338,7 +344,7 @@ static int    proc_read_tcp_listen(const char *filename, char **buffer, int *buf
+ 
+ 	ret = offset;
+ out:
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	return ret;
+ }
+@@ -360,9 +366,12 @@ out:
+  ******************************************************************************/
+ static int	proc_read_file(const char *filename, char **buffer, int *buffer_alloc)
+ {
++	char	path[MAX_STRING_LEN];
+ 	int	n, fd, ret = -1, offset = 0;
+ 
+-	if (-1 == (fd = open(filename, O_RDONLY)))
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	if (-1 == (fd = zbx_open(path, O_RDONLY)))
+ 		return -1;
+ 
+ 	while (0 != (n = read(fd, *buffer + offset, *buffer_alloc - offset)))
+@@ -381,7 +390,7 @@ static int	proc_read_file(const char *filename, char **buffer, int *buffer_alloc
+ 
+ 	ret = offset;
+ out:
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	return ret;
+ }
+@@ -523,15 +532,18 @@ int	NET_IF_COLLISIONS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ int	NET_IF_DISCOVERY(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	char		line[MAX_STRING_LEN], *p;
+ 	FILE		*f;
+ 	struct zbx_json	j;
+ 
+ 	ZBX_UNUSED(request);
+ 
+-	if (NULL == (f = fopen("/proc/net/dev", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/net/dev");
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc/net/dev: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s/dev: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+@@ -568,6 +580,7 @@ int	NET_IF_DISCOVERY(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ int	NET_TCP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	char		pattern[64], *port_str, *buffer = NULL;
+ 	unsigned short	port;
+ 	zbx_uint64_t	listen = 0;
+@@ -634,7 +647,9 @@ int	NET_TCP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ #endif
+ 		buffer = zbx_malloc(NULL, buffer_alloc);
+ 
+-		if (0 < (n = proc_read_tcp_listen("/proc/net/tcp", &buffer, &buffer_alloc)))
++		zbx_rootfs_path(path, sizeof(path), "/proc/net/tcp");
++
++		if (0 < (n = proc_read_tcp_listen(path, &buffer, &buffer_alloc)))
+ 		{
+ 			ret = SYSINFO_RET_OK;
+ 
+@@ -647,7 +662,9 @@ int	NET_TCP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 			}
+ 		}
+ 
+-		if (0 < (n = proc_read_tcp_listen("/proc/net/tcp6", &buffer, &buffer_alloc)))
++		zbx_rootfs_path(path, sizeof(path), "/proc/net/tcp6");
++
++		if (0 < (n = proc_read_tcp_listen(path, &buffer, &buffer_alloc)))
+ 		{
+ 			ret = SYSINFO_RET_OK;
+ 
+@@ -669,6 +686,7 @@ out:
+ 
+ int	NET_UDP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char		path[MAX_STRING_LEN];
+ 	char		pattern[64], *port_str, *buffer = NULL;
+ 	unsigned short	port;
+ 	zbx_uint64_t	listen = 0;
+@@ -690,7 +708,9 @@ int	NET_UDP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ 	buffer = zbx_malloc(NULL, buffer_alloc);
+ 
+-	if (0 < (n = proc_read_file("/proc/net/udp", &buffer, &buffer_alloc)))
++	zbx_rootfs_path(path, sizeof(path), "/proc/net/udp");
++
++	if (0 < (n = proc_read_file(path, &buffer, &buffer_alloc)))
+ 	{
+ 		ret = SYSINFO_RET_OK;
+ 
+@@ -705,7 +725,9 @@ int	NET_UDP_LISTEN(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		}
+ 	}
+ 
+-	if (0 < (n = proc_read_file("/proc/net/udp6", &buffer, &buffer_alloc)))
++	zbx_rootfs_path(path, sizeof(path), "/proc/net/udp6");
++
++	if (0 < (n = proc_read_file(path, &buffer, &buffer_alloc)))
+ 	{
+ 		ret = SYSINFO_RET_OK;
+ 
+diff --git a/src/libs/zbxsysinfo/linux/proc.c b/src/libs/zbxsysinfo/linux/proc.c
+index 83a566b714..fb8d6793ac 100644
+--- a/src/libs/zbxsysinfo/linux/proc.c
++++ b/src/libs/zbxsysinfo/linux/proc.c
+@@ -320,10 +320,13 @@ int	byte_value_from_proc_file(FILE *f, const char *label, const char *guard, zbx
+ 
+ static int	get_total_memory(zbx_uint64_t *total_memory)
+ {
++	char	path[MAX_STRING_LEN];
+ 	FILE	*f;
+ 	int	ret = FAIL;
+ 
+-	if (NULL != (f = fopen("/proc/meminfo", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/meminfo");
++
++	if (NULL != (f = zbx_fopen(path, "r")))
+ 	{
+ 		ret = byte_value_from_proc_file(f, "MemTotal:", NULL, total_memory);
+ 		zbx_fclose(f);
+@@ -350,6 +353,7 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ #define ZBX_VMPTE	13
+ 
+ 	char		tmp[MAX_STRING_LEN], *procname, *proccomm, *param;
++	char		path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	struct dirent	*entries;
+ 	struct passwd	*usrinfo;
+@@ -506,13 +510,15 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		}
+ 	}
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		zbx_fclose(f_cmd);
+ 		zbx_fclose(f_stat);
+@@ -520,14 +526,14 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		if (0 == strcmp(entries->d_name, "self"))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/cmdline", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/cmdline", path, entries->d_name);
+ 
+-		if (NULL == (f_cmd = fopen(tmp, "r")))
++		if (NULL == (f_cmd = zbx_fopen(tmp, "r")))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/status", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/status", path, entries->d_name);
+ 
+-		if (NULL == (f_stat = fopen(tmp, "r")))
++		if (NULL == (f_stat = zbx_fopen(tmp, "r")))
+ 			continue;
+ 
+ 		if (FAIL == check_procname(f_cmd, f_stat, procname))
+@@ -665,7 +671,7 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ clean:
+ 	zbx_fclose(f_cmd);
+ 	zbx_fclose(f_stat);
+-	closedir(dir);
++	zbx_closedir(dir);
+ 
+ 	if ((0 == proccount && 0 != mem_type_tried) || 0 != invalid_read)
+ 	{
+@@ -714,6 +720,7 @@ out:
+ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
+ 	char		tmp[MAX_STRING_LEN], *procname, *proccomm, *param;
++	char		path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	struct dirent	*entries;
+ 	struct passwd	*usrinfo;
+@@ -769,13 +776,15 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		zbx_fclose(f_cmd);
+ 		zbx_fclose(f_stat);
+@@ -783,14 +792,14 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		if (0 == strcmp(entries->d_name, "self"))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/cmdline", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/cmdline", path, entries->d_name);
+ 
+-		if (NULL == (f_cmd = fopen(tmp, "r")))
++		if (NULL == (f_cmd = zbx_fopen(tmp, "r")))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/status", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/status", path, entries->d_name);
+ 
+-		if (NULL == (f_stat = fopen(tmp, "r")))
++		if (NULL == (f_stat = zbx_fopen(tmp, "r")))
+ 			continue;
+ 
+ 		if (FAIL == check_procname(f_cmd, f_stat, procname))
+@@ -809,7 +818,7 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	}
+ 	zbx_fclose(f_cmd);
+ 	zbx_fclose(f_stat);
+-	closedir(dir);
++	zbx_closedir(dir);
+ out:
+ 	SET_UI64_RESULT(result, proccount);
+ 
+@@ -834,16 +843,19 @@ out:
+  ******************************************************************************/
+ static int	proc_get_process_name(pid_t pid, char **procname)
+ {
++	char	path[MAX_STRING_LEN];
+ 	int	n, fd;
+ 	char	tmp[MAX_STRING_LEN], *pend, *pstart;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/stat", (int)pid);
++	zbx_rootfs_path(path, sizeof(path), "/proc");
+ 
+-	if (-1 == (fd = open(tmp, O_RDONLY)))
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d/stat", path, (int)pid);
++
++	if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 		return FAIL;
+ 
+ 	n = read(fd, tmp, sizeof(tmp));
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	if (-1 == n)
+ 		return FAIL;
+@@ -880,14 +892,17 @@ static int	proc_get_process_name(pid_t pid, char **procname)
+  ******************************************************************************/
+ static int	proc_get_process_cmdline(pid_t pid, char **cmdline, size_t *cmdline_nbytes)
+ {
++	char	path[MAX_STRING_LEN];
+ 	char	tmp[MAX_STRING_LEN];
+ 	int	fd, n;
+ 	size_t	cmdline_alloc = ZBX_KIBIBYTE;
+ 
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
+ 	*cmdline_nbytes = 0;
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/cmdline", (int)pid);
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d/cmdline", path, (int)pid);
+ 
+-	if (-1 == (fd = open(tmp, O_RDONLY)))
++	if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 		return FAIL;
+ 
+ 	*cmdline = zbx_malloc(NULL, cmdline_alloc);
+@@ -903,7 +918,7 @@ static int	proc_get_process_cmdline(pid_t pid, char **cmdline, size_t *cmdline_n
+ 		}
+ 	}
+ 
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	if (0 < *cmdline_nbytes)
+ 	{
+@@ -943,10 +958,13 @@ static int	proc_get_process_cmdline(pid_t pid, char **cmdline, size_t *cmdline_n
+  ******************************************************************************/
+ static int	proc_get_process_uid(pid_t pid, uid_t *uid)
+ {
++	char		path[MAX_STRING_LEN];
+ 	char		tmp[MAX_STRING_LEN];
+ 	zbx_stat_t	st;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d", (int)pid);
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d", path, (int)pid);
+ 
+ 	if (0 != zbx_stat(tmp, &st))
+ 		return FAIL;
+@@ -1000,12 +1018,15 @@ static int	proc_read_value(const char *ptr, zbx_uint64_t *value)
+  ******************************************************************************/
+ static int	proc_read_cpu_util(zbx_procstat_util_t *procutil)
+ {
++	char	path[MAX_STRING_LEN];
+ 	int	n, offset, fd, ret = SUCCEED;
+ 	char	tmp[MAX_STRING_LEN], *ptr;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/stat", (int)procutil->pid);
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d/stat", path, (int)procutil->pid);
+ 
+-	if (-1 == (fd = open(tmp, O_RDONLY)))
++	if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 		return -errno;
+ 
+ 	if (-1 == (n = read(fd, tmp, sizeof(tmp) - 1)))
+@@ -1063,7 +1084,7 @@ static int	proc_read_cpu_util(zbx_procstat_util_t *procutil)
+ 
+ 	ret = -ENODATA;
+ out:
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	return ret;
+ }
+@@ -1239,7 +1260,7 @@ out:
+ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ {
+ 	const char		*__function_name = "zbx_proc_get_processes";
+-
++	char			path[MAX_STRING_LEN];
+ 	DIR			*dir;
+ 	struct dirent		*entries;
+ 	int			ret = FAIL, pid;
+@@ -1247,10 +1268,12 @@ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ 
+ 	zabbix_log(LOG_LEVEL_TRACE, "In %s()", __function_name);
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 		goto out;
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		/* skip entries not containing pids */
+ 		if (FAIL == is_uint32(entries->d_name, &pid))
+@@ -1262,7 +1285,7 @@ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ 		zbx_vector_ptr_append(processes, proc);
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ 
+ 	ret = SUCCEED;
+ out:
+diff --git a/src/libs/zbxsysinfo/linux/sensors.c b/src/libs/zbxsysinfo/linux/sensors.c
+index c19f1532c8..d504b7025f 100644
+--- a/src/libs/zbxsysinfo/linux/sensors.c
++++ b/src/libs/zbxsysinfo/linux/sensors.c
+@@ -122,6 +122,7 @@ static const char	*sysfs_read_attr(const char *device, char **attribute)
+ 
+ static int	get_device_info(const char *dev_path, const char *dev_name, char *device_info, const char **name_subfolder)
+ {
++	char		path[MAX_STRING_LEN];
+ 	char		bus_path[MAX_STRING_LEN], linkpath[MAX_STRING_LEN], subsys_path[MAX_STRING_LEN];
+ 	char		*subsys, *prefix = NULL, *bus_attr = NULL;
+ 	const char	*bus_subfolder;
+@@ -181,7 +182,8 @@ static int	get_device_info(const char *dev_path, const char *dev_name, char *dev
+ 		}
+ 		else
+ 		{
+-			zbx_snprintf(bus_path, sizeof(bus_path), "/sys/class/i2c-adapter/i2c-%d", bus_i2c);
++			zbx_rootfs_path(path, sizeof(path), "/sys");
++			zbx_snprintf(bus_path, sizeof(bus_path), "%s/class/i2c-adapter/i2c-%d", path, bus_i2c);
+ 			bus_subfolder = sysfs_read_attr(bus_path, &bus_attr);
+ 
+ 			if (NULL != bus_subfolder && '\0' != *bus_subfolder)
+@@ -257,11 +259,14 @@ out:
+ static void	get_device_sensors(int do_task, const char *device, const char *name, double *aggr, int *cnt)
+ {
+ 	char	sensorname[MAX_STRING_LEN];
++	char	path[MAX_STRING_LEN];
+ 
+ #ifdef KERNEL_2_4
+ 	if (ZBX_DO_ONE == do_task)
+ 	{
+-		zbx_snprintf(sensorname, sizeof(sensorname), "%s/%s/%s", DEVICE_DIR, device, name);
++		zbx_rootfs_path(path, sizeof(path), DEVICE_DIR);
++		zbx_snprintf(sensorname, sizeof(sensorname), "%s/%s/%s", path, device, name);
++
+ 		count_sensor(do_task, sensorname, aggr, cnt);
+ 	}
+ 	else
+@@ -270,7 +275,9 @@ static void	get_device_sensors(int do_task, const char *device, const char *name
+ 		struct dirent	*deviceent, *sensorent;
+ 		char		devicename[MAX_STRING_LEN];
+ 
+-		if (NULL == (devicedir = opendir(DEVICE_DIR)))
++		zbx_rootfs_path(path, sizeof(path), DEVICE_DIR);
++
++		if (NULL == (devicedir = opendir(path)))
+ 			return;
+ 
+ 		while (NULL != (deviceent = readdir(devicedir)))
+@@ -281,7 +288,7 @@ static void	get_device_sensors(int do_task, const char *device, const char *name
+ 			if (NULL == zbx_regexp_match(deviceent->d_name, device, NULL))
+ 				continue;
+ 
+-			zbx_snprintf(devicename, sizeof(devicename), "%s/%s", DEVICE_DIR, deviceent->d_name);
++			zbx_snprintf(devicename, sizeof(devicename), "%s/%s", path, deviceent->d_name);
+ 
+ 			if (NULL == (sensordir = opendir(devicename)))
+ 				continue;
+@@ -309,7 +316,8 @@ static void	get_device_sensors(int do_task, const char *device, const char *name
+ 	const char	*subfolder;
+ 	int		err, dev_len;
+ 
+-	zbx_snprintf(hwmon_dir, sizeof(hwmon_dir), "%s", DEVICE_DIR);
++	zbx_rootfs_path(path, sizeof(path), DEVICE_DIR);
++	zbx_snprintf(hwmon_dir, sizeof(hwmon_dir), "%s", path);
+ 
+ 	if (NULL == (devicedir = opendir(hwmon_dir)))
+ 		return;
+@@ -319,9 +327,9 @@ static void	get_device_sensors(int do_task, const char *device, const char *name
+ 		if (0 == strcmp(deviceent->d_name, ".") || 0 == strcmp(deviceent->d_name, ".."))
+ 			continue;
+ 
+-		zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s/device", DEVICE_DIR, deviceent->d_name);
++		zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s/device", path, deviceent->d_name);
+ 		dev_len = readlink(devicepath, deviced, MAX_STRING_LEN - 1);
+-		zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s", DEVICE_DIR, deviceent->d_name);
++		zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s", path, deviceent->d_name);
+ 
+ 		if (0 > dev_len)
+ 		{
+@@ -344,7 +352,7 @@ static void	get_device_sensors(int do_task, const char *device, const char *name
+ 
+ 		if (SUCCEED == err && 0 == strcmp(device_info, device))
+ 		{
+-			zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s%s", DEVICE_DIR, deviceent->d_name,
++			zbx_snprintf(devicepath, sizeof(devicepath), "%s/%s%s", path, deviceent->d_name,
+ 					subfolder);
+ 
+ 			if (ZBX_DO_ONE == do_task)
+diff --git a/src/libs/zbxsysinfo/linux/software.c b/src/libs/zbxsysinfo/linux/software.c
+index e0c0efcfa7..61ec05f2e8 100644
+--- a/src/libs/zbxsysinfo/linux/software.c
++++ b/src/libs/zbxsysinfo/linux/software.c
+@@ -62,7 +62,7 @@ int     SYSTEM_SW_OS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 
+ 	if (NULL == type || '\0' == *type || 0 == strcmp(type, "full"))
+ 	{
+-		if (NULL == (f = fopen(SW_OS_FULL, "r")))
++		if (NULL == (f = zbx_fopen(SW_OS_FULL, "r")))
+ 		{
+ 			SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open " SW_OS_FULL ": %s",
+ 					zbx_strerror(errno)));
+@@ -71,7 +71,7 @@ int     SYSTEM_SW_OS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	}
+ 	else if (0 == strcmp(type, "short"))
+ 	{
+-		if (NULL == (f = fopen(SW_OS_SHORT, "r")))
++		if (NULL == (f = zbx_fopen(SW_OS_SHORT, "r")))
+ 		{
+ 			SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open " SW_OS_SHORT ": %s",
+ 					zbx_strerror(errno)));
+@@ -82,7 +82,7 @@ int     SYSTEM_SW_OS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	{
+ 		/* firstly need to check option PRETTY_NAME in /etc/os-release */
+ 		/* if cannot find it, get value from /etc/issue.net            */
+-		if (NULL != (f = fopen(SW_OS_NAME_RELEASE, "r")))
++		if (NULL != (f = zbx_fopen(SW_OS_NAME_RELEASE, "r")))
+ 		{
+ 			while (NULL != fgets(tmp_line, sizeof(tmp_line), f))
+ 			{
+@@ -99,7 +99,7 @@ int     SYSTEM_SW_OS(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 			zbx_fclose(f);
+ 		}
+ 
+-		if (FAIL == line_read && NULL == (f = fopen(SW_OS_NAME, "r")))
++		if (FAIL == line_read && NULL == (f = zbx_fopen(SW_OS_NAME, "r")))
+ 		{
+ 			SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open " SW_OS_NAME ": %s",
+ 					zbx_strerror(errno)));
+diff --git a/src/libs/zbxsysinfo/linux/swap.c b/src/libs/zbxsysinfo/linux/swap.c
+index 351e505e8b..77f2521ed0 100644
+--- a/src/libs/zbxsysinfo/linux/swap.c
++++ b/src/libs/zbxsysinfo/linux/swap.c
+@@ -123,6 +123,7 @@ static int	get_swap_dev_stat(const char *swapdev, swap_stat_t *result)
+ 	char		line[MAX_STRING_LEN];
+ 	unsigned int	rdev_major, rdev_minor;
+ 	zbx_stat_t	dev_st;
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 
+ 	assert(result);
+@@ -130,7 +131,9 @@ static int	get_swap_dev_stat(const char *swapdev, swap_stat_t *result)
+ 	if (-1 == zbx_stat(swapdev, &dev_st))
+ 		return ret;
+ 
+-	if (NULL == (f = fopen(INFO_FILE_NAME, "r")))
++	zbx_rootfs_path(path, sizeof(path), INFO_FILE_NAME);
++
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 		return ret;
+ 
+ 	while (NULL != fgets(line, sizeof(line), f))
+@@ -143,7 +146,7 @@ static int	get_swap_dev_stat(const char *swapdev, swap_stat_t *result)
+ 			break;
+ 		}
+ 	}
+-	fclose(f);
++	zbx_fclose(f);
+ 
+ 	return ret;
+ }
+@@ -155,13 +158,16 @@ static int	get_swap_pages(swap_stat_t *result)
+ #ifndef KERNEL_2_4
+ 	char	st = 0;
+ #endif
++	char	path[MAX_STRING_LEN];
+ 	FILE	*f;
+ 
+ #ifdef KERNEL_2_4
+-	if (NULL != (f = fopen("/proc/stat", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/stat");
+ #else
+-	if (NULL != (f = fopen("/proc/vmstat", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/vmstat");
+ #endif
++
++	if (NULL != (f = zbx_fopen(path, "r")))
+ 	{
+ 		while (NULL != fgets(line, sizeof(line), f))
+ 		{
+@@ -205,6 +211,8 @@ static int	get_swap_stat(const char *swapdev, swap_stat_t *result)
+ {
+ 	int		offset = 0, ret = SYSINFO_RET_FAIL;
+ 	swap_stat_t	curr;
++	char		path[MAX_STRING_LEN], devpath[MAX_STRING_LEN];
++	int			devpath_len;
+ 	FILE		*f;
+ 	char		line[MAX_STRING_LEN], *s;
+ 
+@@ -215,10 +223,18 @@ static int	get_swap_stat(const char *swapdev, swap_stat_t *result)
+ 		ret = get_swap_pages(result);
+ 		swapdev = NULL;
+ 	}
+-	else if (0 != strncmp(swapdev, "/dev/", 5))
+-		offset = 5;
++	else
++	{
++		zbx_rootfs_path(devpath, sizeof(devpath), "/dev/");
++		devpath_len = strlen(devpath);
++
++		if (0 != strncmp(swapdev, devpath, devpath_len))
++			offset = devpath_len;
++	}
++
++	zbx_rootfs_path(path, sizeof(path), "/proc/swaps");
+ 
+-	if (NULL == (f = fopen("/proc/swaps", "r")))
++	if (NULL == (f = zbx_fopen(path, "r")))
+ 		return ret;
+ 
+ 	while (NULL != fgets(line, sizeof(line), f))
+@@ -244,7 +260,7 @@ static int	get_swap_stat(const char *swapdev, swap_stat_t *result)
+ 			ret = SYSINFO_RET_OK;
+ 		}
+ 	}
+-	fclose(f);
++	zbx_fclose(f);
+ 
+ 	return ret;
+ }
+diff --git a/src/libs/zbxsysinfo/openbsd/net.c b/src/libs/zbxsysinfo/openbsd/net.c
+index 41b343741f..7ee32aa612 100644
+--- a/src/libs/zbxsysinfo/openbsd/net.c
++++ b/src/libs/zbxsysinfo/openbsd/net.c
+@@ -198,7 +198,7 @@ static int	get_ifdata(const char *if_name,
+ 		ret = SYSINFO_RET_OK;
+ clean:
+ 		if (if_s >= 0)
+-			close(if_s);
++			zbx_close(if_s);
+ 	}
+ 
+ 	return ret;
+diff --git a/src/libs/zbxsysinfo/osf/proc.c b/src/libs/zbxsysinfo/osf/proc.c
+index 9892d0b05b..0fa47027bb 100644
+--- a/src/libs/zbxsysinfo/osf/proc.c
++++ b/src/libs/zbxsysinfo/osf/proc.c
+@@ -24,6 +24,7 @@
+ 
+ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char	path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	int		proc;
+ 	struct dirent	*entries;
+@@ -75,20 +76,22 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+-		strscpy(filename, "/proc/");
++		strscpy(filename, path);
+ 		zbx_strlcat(filename, entries->d_name, MAX_STRING_LEN);
+ 
+ 		if (0 == zbx_stat(filename, &buf))
+ 		{
+-			proc = open(filename, O_RDONLY);
++			proc = zbx_open(filename, O_RDONLY);
+ 			if (-1 == proc)
+ 				goto lbl_skip_procces;
+ 
+@@ -128,11 +131,11 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 			}
+ lbl_skip_procces:
+ 			if (-1 != proc)
+-				close(proc);
++				zbx_close(proc);
+ 		}
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ 
+ 	if (0 > memsize)
+ 	{
+@@ -150,6 +153,7 @@ out:
+ 
+ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
++	char	path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	int		proc;
+ 	struct  dirent	*entries;
+@@ -199,20 +203,22 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+-		strscpy(filename, "/proc/");
++		strscpy(filename, path);
+ 		zbx_strlcat(filename, entries->d_name,MAX_STRING_LEN);
+ 
+ 		if (0 == zbx_stat(filename, &buf))
+ 		{
+-			proc = open(filename, O_RDONLY);
++			proc = zbx_open(filename, O_RDONLY);
+ 			if (-1 == proc)
+ 				goto lbl_skip_procces;
+ 
+@@ -242,11 +248,11 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 			proccount++;
+ lbl_skip_procces:
+ 			if (-1 != proc)
+-				close(proc);
++				zbx_close(proc);
+ 		}
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ out:
+ 	SET_UI64_RESULT(result, proccount);
+ 
+diff --git a/src/libs/zbxsysinfo/solaris/diskspace.c b/src/libs/zbxsysinfo/solaris/diskspace.c
+index 20c80d14ad..54e594a921 100644
+--- a/src/libs/zbxsysinfo/solaris/diskspace.c
++++ b/src/libs/zbxsysinfo/solaris/diskspace.c
+@@ -200,13 +200,17 @@ int	VFS_FS_SIZE(AGENT_REQUEST *request, AGENT_RESULT *result)
+ int	VFS_FS_DISCOVERY(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
+ 	struct mnttab	mt;
++	char		path[MAX_STRING_LEN];
+ 	FILE		*f;
+ 	struct zbx_json	j;
+ 
+ 	/* opening the mounted filesystems file */
+-	if (NULL == (f = fopen("/etc/mnttab", "r")))
++
++	zbx_rootfs_path(path, sizeof(path), "/etc/mnttab");
++
++	if (NULL == (f = zbx_rootfs_fopen(path, "r")))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /etc/mnttab: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+diff --git a/src/libs/zbxsysinfo/solaris/proc.c b/src/libs/zbxsysinfo/solaris/proc.c
+index 19697073d1..c621a993b2 100644
+--- a/src/libs/zbxsysinfo/solaris/proc.c
++++ b/src/libs/zbxsysinfo/solaris/proc.c
+@@ -82,6 +82,7 @@ static int	check_procstate(psinfo_t *psinfo, int zbx_proc_stat)
+ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
+ 	char		tmp[MAX_STRING_LEN], *procname, *proccomm, *param, *memtype = NULL;
++	char	path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	struct dirent	*entries;
+ 	struct passwd	*usrinfo;
+@@ -159,23 +160,25 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	path = zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		if (-1 != fd)
+ 		{
+-			close(fd);
++			zbx_close(fd);
+ 			fd = -1;
+ 		}
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/psinfo", path, entries->d_name);
+ 
+-		if (-1 == (fd = open(tmp, O_RDONLY)))
++		if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 			continue;
+ 
+ 		if (-1 == read(fd, &psinfo, sizeof(psinfo)))
+@@ -227,9 +230,9 @@ int	PROC_MEM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		}
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ 	if (-1 != fd)
+-		close(fd);
++		zbx_close(fd);
+ out:
+ 	if (NULL != p_value)
+ 	{
+@@ -252,6 +255,7 @@ out:
+ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ {
+ 	char		tmp[MAX_STRING_LEN], *procname, *proccomm, *param;
++	char	path[MAX_STRING_LEN];
+ 	DIR		*dir;
+ 	struct dirent	*entries;
+ 	zbx_stat_t	buf;
+@@ -308,26 +312,28 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 	if (1 == invalid_user)	/* handle 0 for non-existent user after all parameters have been parsed and validated */
+ 		goto out;
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 	{
+-		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open /proc: %s", zbx_strerror(errno)));
++		SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot open %s: %s", path, zbx_strerror(errno)));
+ 		return SYSINFO_RET_FAIL;
+ 	}
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		if (-1 != fd)
+ 		{
+-			close(fd);
++			zbx_close(fd);
+ 			fd = -1;
+ 		}
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/psinfo", path, entries->d_name);
+ 
+ 		if (0 != zbx_stat(tmp, &buf))
+ 			continue;
+ 
+-		if (-1 == (fd = open(tmp, O_RDONLY)))
++		if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 			continue;
+ 
+ 		if (-1 == read(fd, &psinfo, sizeof(psinfo)))
+@@ -348,9 +354,9 @@ int	PROC_NUM(AGENT_REQUEST *request, AGENT_RESULT *result)
+ 		proccount++;
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ 	if (-1 != fd)
+-		close(fd);
++		zbx_close(fd);
+ out:
+ 	SET_UI64_RESULT(result, proccount);
+ 
+@@ -499,27 +505,30 @@ static int	zbx_solaris_version_get(unsigned int *major_version, unsigned int *mi
+  ******************************************************************************/
+ static int	proc_read_cpu_util(zbx_procstat_util_t *procutil)
+ {
++	char	path[MAX_STRING_LEN];
+ 	int		fd, n;
+ 	char		tmp[MAX_STRING_LEN];
+ 	psinfo_t	psinfo;
+ 	prusage_t	prusage;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/psinfo", (int)procutil->pid);
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d/psinfo", path, (int)procutil->pid);
+ 
+-	if (-1 == (fd = open(tmp, O_RDONLY)))
++	if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 		return -errno;
+ 
+ 	n = read(fd, &psinfo, sizeof(psinfo));
+-	close(fd);
++	zbx_close(fd);
+ 
+ 	if (-1 == n)
+ 		return -errno;
+ 
+ 	procutil->starttime = psinfo.pr_start.tv_sec;
+ 
+-	zbx_snprintf(tmp, sizeof(tmp), "/proc/%d/usage", (int)procutil->pid);
++	zbx_snprintf(tmp, sizeof(tmp), "%s/%d/usage", path, (int)procutil->pid);
+ 
+-	if (-1 == (fd = open(tmp, O_RDONLY)))
++	if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 		return -errno;
+ 
+ 	n = read(fd, &prusage, sizeof(prusage));
+@@ -579,6 +588,7 @@ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ {
+ 	const char		*__function_name = "zbx_proc_get_processes";
+ 
++	chart		path[MAX_STRING_LEN];
+ 	DIR			*dir;
+ 	struct dirent		*entries;
+ 	char			tmp[MAX_STRING_LEN];
+@@ -588,22 +598,24 @@ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ 
+ 	zabbix_log(LOG_LEVEL_TRACE, "In %s()", __function_name);
+ 
+-	if (NULL == (dir = opendir("/proc")))
++	zbx_rootfs_path(path, sizeof(path), "/proc");
++
++	if (NULL == (dir = zbx_opendir(path)))
+ 		goto out;
+ 
+-	while (NULL != (entries = readdir(dir)))
++	while (NULL != (entries = zbx_readdir(dir)))
+ 	{
+ 		/* skip entries not containing pids */
+ 		if (FAIL == is_uint32(entries->d_name, &pid))
+ 			continue;
+ 
+-		zbx_snprintf(tmp, sizeof(tmp), "/proc/%s/psinfo", entries->d_name);
++		zbx_snprintf(tmp, sizeof(tmp), "%s/%s/psinfo", path, entries->d_name);
+ 
+-		if (-1 == (fd = open(tmp, O_RDONLY)))
++		if (-1 == (fd = zbx_open(tmp, O_RDONLY)))
+ 			continue;
+ 
+ 		n = read(fd, &psinfo, sizeof(psinfo));
+-		close(fd);
++		zbx_close(fd);
+ 
+ 		if (-1 == n)
+ 			continue;
+@@ -629,7 +641,7 @@ int	zbx_proc_get_processes(zbx_vector_ptr_t *processes, unsigned int flags)
+ 		zbx_vector_ptr_append(processes, proc);
+ 	}
+ 
+-	closedir(dir);
++	zbx_closedir(dir);
+ 
+ 	ret = SUCCEED;
+ out:
+diff --git a/src/zabbix_agent/cpustat.c b/src/zabbix_agent/cpustat.c
+index 0d7cd9d71c..fe8a22be45 100644
+--- a/src/zabbix_agent/cpustat.c
++++ b/src/zabbix_agent/cpustat.c
+@@ -312,6 +312,7 @@ static void	update_cpustats(ZBX_CPUS_STAT_DATA *pcpus)
+ 
+ #if defined(HAVE_PROC_STAT)
+ 
++	char		path[MAX_STRING_LEN];
+ 	FILE		*file;
+ 	char		line[1024];
+ 	unsigned char	*cpu_status = NULL;
+@@ -356,9 +357,11 @@ static void	update_cpustats(ZBX_CPUS_STAT_DATA *pcpus)
+ 
+ #if defined(HAVE_PROC_STAT)
+ 
+-	if (NULL == (file = fopen(filename, "r")))
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	if (NULL == (file = zbx_fopen(path, "r")))
+ 	{
+-		zbx_error("cannot open [%s]: %s", filename, zbx_strerror(errno));
++		zbx_error("cannot open [%s]: %s", path, zbx_strerror(errno));
+ 		ZBX_SET_CPUS_NOTSUPPORTED();
+ 		goto exit;
+ 	}
+diff --git a/src/zabbix_agent/logfiles.c b/src/zabbix_agent/logfiles.c
+index 8082c7f881..7dafc2ee89 100644
+--- a/src/zabbix_agent/logfiles.c
++++ b/src/zabbix_agent/logfiles.c
+@@ -587,7 +587,7 @@ static int	is_same_file(const struct st_logfile *old, const struct st_logfile *n
+ 			else
+ 				ret = ZBX_SAME_FILE_ERROR;
+ 
+-			if (0 != close(f))
++			if (0 != zbx_close(f))
+ 			{
+ 				if (ZBX_SAME_FILE_ERROR != ret)
+ 				{
+@@ -1277,7 +1277,7 @@ clean:
+ 	DIR		*dir = NULL;
+ 	struct dirent	*d_ent = NULL;
+ 
+-	if (NULL == (dir = opendir(directory)))
++	if (NULL == (dir = zbx_opendir(directory)))
+ 	{
+ 		*err_msg = zbx_dsprintf(*err_msg, "Cannot open directory \"%s\" for reading: %s", directory,
+ 				zbx_strerror(errno));
+@@ -1287,12 +1287,12 @@ clean:
+ 	/* on UNIX file systems we always assume that inodes can be used to identify files */
+ 	*use_ino = 1;
+ 
+-	while (NULL != (d_ent = readdir(dir)))
++	while (NULL != (d_ent = zbx_readdir(dir)))
+ 	{
+ 		pick_logfile(directory, d_ent->d_name, mtime, re, logfiles, logfiles_alloc, logfiles_num);
+ 	}
+ 
+-	if (-1 == closedir(dir))
++	if (-1 == zbx_closedir(dir))
+ 	{
+ 		*err_msg = zbx_dsprintf(*err_msg, "Cannot close directory \"%s\": %s", directory, zbx_strerror(errno));
+ 		return FAIL;
+@@ -1456,7 +1456,7 @@ clean1:
+ 			ret = FAIL;
+ #endif	/*_WINDOWS*/
+ clean3:
+-		if (0 != close(f))
++		if (0 != zbx_close(f))
+ 		{
+ 			*err_msg = zbx_dsprintf(*err_msg, "Cannot close file \"%s\": %s", p->filename,
+ 					zbx_strerror(errno));
+@@ -1938,7 +1938,7 @@ static int	process_log(unsigned char flags, const char *filename, zbx_uint64_t *
+ 				l_size, filename, zbx_strerror(errno));
+ 	}
+ 
+-	if (0 != close(f))
++	if (0 != zbx_close(f))
+ 	{
+ 		*err_msg = zbx_dsprintf(*err_msg, "Cannot close file \"%s\": %s", filename, zbx_strerror(errno));
+ 		ret = FAIL;
+@@ -2146,7 +2146,7 @@ static int	adjust_position_after_jump(struct st_logfile *logfile, zbx_uint64_t *
+ 		}
+ 	}
+ out:
+-	if (0 != close(fd))
++	if (0 != zbx_close(fd))
+ 	{
+ 		*err_msg = zbx_dsprintf(*err_msg, "Cannot close file \"%s\": %s", logfile->filename,
+ 				zbx_strerror(errno));
+@@ -2345,6 +2345,7 @@ int	process_logrt(unsigned char flags, const char *filename, zbx_uint64_t *lastl
+ 		zbx_process_value_func_t process_value, const char *server, unsigned short port, const char *hostname,
+ 		const char *key, int *jumped, float max_delay, double *start_time, zbx_uint64_t *processed_bytes)
+ {
++	char			path[MAX_STRING_LEN];
+ 	const char		*__function_name = "process_logrt";
+ 	int			i, j, start_idx, ret = FAIL, logfiles_num = 0, logfiles_alloc = 0, seq = 1,
+ 				max_old_seq = 0, old_last, from_first_file = 1, last_processed, limit_reached = 0;
+@@ -2371,7 +2372,9 @@ int	process_logrt(unsigned char flags, const char *filename, zbx_uint64_t *lastl
+ 				"seconds back.", (int)(old_mtime - now));
+ 	}
+ 
+-	if (SUCCEED != make_logfile_list(flags, filename, mtime, &logfiles, &logfiles_alloc, &logfiles_num, use_ino,
++	zbx_rootfs_path(path, sizeof(path), filename);
++
++	if (SUCCEED != make_logfile_list(flags, path, mtime, &logfiles, &logfiles_alloc, &logfiles_num, use_ino,
+ 			err_msg))
+ 	{
+ 		/* an error occurred or a file was not accessible for a log[] or log.count[] item */
+diff --git a/src/zabbix_agent/stats.c b/src/zabbix_agent/stats.c
+index 28c3b3a22a..e4fe8cadae 100644
+--- a/src/zabbix_agent/stats.c
++++ b/src/zabbix_agent/stats.c
+@@ -99,10 +99,13 @@ static int	zbx_get_cpu_num()
+ 
+ 	return ncpu;
+ #elif defined(HAVE_PROC_CPUINFO)
++	char	path[MAX_STRING_LEN];
+ 	FILE	*f = NULL;
+ 	int	ncpu = 0;
+ 
+-	if (NULL == (file = fopen("/proc/cpuinfo", "r")))
++	zbx_rootfs_path(path, sizeof(path), "/proc/cpuinfo");
++
++	if (NULL == (file = zbx_fopen(path, "r")))
+ 		goto return_one;
+ 
+ 	while (NULL != fgets(line, 1024, file))
+diff --git a/src/zabbix_agent/zabbix_agentd.c b/src/zabbix_agent/zabbix_agentd.c
+index 405d6437d2..1b2cb79cef 100644
+--- a/src/zabbix_agent/zabbix_agentd.c
++++ b/src/zabbix_agent/zabbix_agentd.c
+@@ -747,6 +747,8 @@ static void	zbx_load_config(int requirement, ZBX_TASK_EX *task)
+ 			PARM_OPT,	0,			1},
+ 		{"User",			&CONFIG_USER,				TYPE_STRING,
+ 			PARM_OPT,	0,			0},
++		{"RootFilesystem",		&CONFIG_ROOT_FILESYSTEM,		TYPE_STRING,
++			PARM_OPT,	0,			0},
+ #endif
+ #ifdef _WINDOWS
+ 		{"PerfCounter",			&CONFIG_PERF_COUNTERS,			TYPE_MULTISTRING,
+diff --git a/src/zabbix_agent/zbxconf.c b/src/zabbix_agent/zbxconf.c
+index 0fc906d3be..5ebdddc61f 100644
+--- a/src/zabbix_agent/zbxconf.c
++++ b/src/zabbix_agent/zbxconf.c
+@@ -59,6 +59,7 @@ char	**CONFIG_PERF_COUNTERS		= NULL;
+ #endif
+ 
+ char	*CONFIG_USER			= NULL;
++char	*CONFIG_ROOT_FILESYSTEM	= NULL;
+ 
+ /* TLS parameters */
+ unsigned int	configured_tls_connect_mode = ZBX_TCP_SEC_UNENCRYPTED;
+diff --git a/src/zabbix_agent/zbxconf.h b/src/zabbix_agent/zbxconf.h
+index 04a2c4b6f4..5e7ded82ba 100644
+--- a/src/zabbix_agent/zbxconf.h
++++ b/src/zabbix_agent/zbxconf.h
+@@ -40,6 +40,9 @@ extern char	**CONFIG_LOAD_MODULE;
+ extern char	**CONFIG_PERF_COUNTERS;
+ #endif
+ extern char	*CONFIG_USER;
++#ifndef _WINDOWS
++extern char	*CONFIG_ROOT_FILESYSTEM;
++#endif
+ 
+ extern unsigned int	configured_tls_connect_mode;
+ extern unsigned int	configured_tls_accept_modes;
+diff --git a/src/zabbix_get/Makefile.am b/src/zabbix_get/Makefile.am
+index c90244e911..06cb8e48a6 100644
+--- a/src/zabbix_get/Makefile.am
++++ b/src/zabbix_get/Makefile.am
+@@ -6,12 +6,12 @@ zabbix_get_SOURCES = zabbix_get.c
+ 
+ zabbix_get_LDADD = \
+ 	$(top_srcdir)/src/libs/zbxcomms/libzbxcomms.a \
+-	$(top_srcdir)/src/libs/zbxcommon/libzbxcommon.a \
+ 	$(top_srcdir)/src/libs/zbxlog/libzbxlog.a \
+-	$(top_srcdir)/src/libs/zbxcrypto/libzbxcrypto.a \
+ 	$(top_srcdir)/src/libs/zbxsys/libzbxsys.a \
+ 	$(top_srcdir)/src/libs/zbxnix/libzbxnix.a \
+-	$(top_srcdir)/src/libs/zbxconf/libzbxconf.a
++	$(top_srcdir)/src/libs/zbxconf/libzbxconf.a \
++	$(top_srcdir)/src/libs/zbxcommon/libzbxcommon.a \
++	$(top_srcdir)/src/libs/zbxcrypto/libzbxcrypto.a
+ 
+ zabbix_get_LDADD += @ZBXGET_LIBS@
+ 
+diff --git a/src/zabbix_sender/Makefile.am b/src/zabbix_sender/Makefile.am
+index 7e790cc93d..175d463fa5 100644
+--- a/src/zabbix_sender/Makefile.am
++++ b/src/zabbix_sender/Makefile.am
+@@ -6,13 +6,13 @@ zabbix_sender_SOURCES = zabbix_sender.c
+ 
+ zabbix_sender_LDADD = \
+ 	$(top_srcdir)/src/libs/zbxcomms/libzbxcomms.a \
+-	$(top_srcdir)/src/libs/zbxcommon/libzbxcommon.a \
+ 	$(top_srcdir)/src/libs/zbxlog/libzbxlog.a \
+ 	$(top_srcdir)/src/libs/zbxsys/libzbxsys.a \
+ 	$(top_srcdir)/src/libs/zbxnix/libzbxnix.a \
+-	$(top_srcdir)/src/libs/zbxcrypto/libzbxcrypto.a \
+ 	$(top_srcdir)/src/libs/zbxconf/libzbxconf.a \
+-	$(top_srcdir)/src/libs/zbxjson/libzbxjson.a
++	$(top_srcdir)/src/libs/zbxjson/libzbxjson.a \
++	$(top_srcdir)/src/libs/zbxcommon/libzbxcommon.a \
++	$(top_srcdir)/src/libs/zbxcrypto/libzbxcrypto.a
+ 
+ zabbix_sender_LDADD += @SENDER_LIBS@
+ 
+diff --git a/src/zabbix_sender/zabbix_sender.c b/src/zabbix_sender/zabbix_sender.c
+index ea27e006fa..9869b960a1 100644
+--- a/src/zabbix_sender/zabbix_sender.c
++++ b/src/zabbix_sender/zabbix_sender.c
+@@ -1092,7 +1092,7 @@ int	main(int argc, char **argv)
+ 				setvbuf(stdin, (char *)NULL, _IOLBF, 1024);
+ 			}
+ 		}
+-		else if (NULL == (in = fopen(INPUT_FILE, "r")))
++		else if (NULL == (in = zbx_fopen(INPUT_FILE, "r")))
+ 		{
+ 			zabbix_log(LOG_LEVEL_CRIT, "cannot open [%s]: %s", INPUT_FILE, zbx_strerror(errno));
+ 			goto free;
+@@ -1243,7 +1243,7 @@ int	main(int argc, char **argv)
+ 		}
+ 
+ 		if (in != stdin)
+-			fclose(in);
++			zbx_fclose(in);
+ 
+ 		zbx_free(key_value);
+ 		zbx_free(in_line);
+diff --git a/src/zabbix_server/snmptrapper/snmptrapper.c b/src/zabbix_server/snmptrapper/snmptrapper.c
+index 2f9627795d..c159968e1b 100644
+--- a/src/zabbix_server/snmptrapper/snmptrapper.c
++++ b/src/zabbix_server/snmptrapper/snmptrapper.c
+@@ -477,7 +477,7 @@ out:
+ static void	close_trap_file()
+ {
+ 	if (-1 != trap_fd)
+-		close(trap_fd);
++		zbx_close(trap_fd);
+ 
+ 	trap_fd = -1;
+ 	trap_lastsize = 0;
+@@ -516,7 +516,7 @@ static int	open_trap_file()
+ 		goto out;
+ 	}
+ 
+-	if (-1 == (trap_fd = open(CONFIG_SNMPTRAP_FILE, O_RDONLY)))
++	if (-1 == (trap_fd = zbx_open(CONFIG_SNMPTRAP_FILE, O_RDONLY)))
+ 	{
+ 		if (ENOENT != errno)	/* file exists but cannot be opened */
+ 		{
+@@ -669,5 +669,5 @@ ZBX_THREAD_ENTRY(snmptrapper_thread, args)
+ 	zbx_free(buffer);
+ 
+ 	if (-1 != trap_fd)
+-		close(trap_fd);
++		zbx_close(trap_fd);
+ }
+-- 
+2.11.0
+

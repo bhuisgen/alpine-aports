@@ -1,0 +1,99 @@
+# Maintainer: Boris HUISGEN <bhuisgen@hbis.fr>
+pkgname=zabbix-java-gateway
+pkgver=3.2.3
+pkgrel=0
+pkgdesc="Zabbix Network Monitoring Java Gateway"
+url="http://www.zabbix.com"
+arch="noarch"
+license="GPL"
+depends="openjdk8"
+makedepends="autoconf automake curl-dev gnutls-dev libssh2 libxml2-dev
+    mariadb-dev net-snmp-dev openipmi-dev openjdk8 postgresql-dev sqlite-dev
+    unixodbc-dev"
+install="$pkgname.pre-install"
+pkgusers="zabbix"
+pkggroups="zabbix"
+source="http://downloads.sourceforge.net/zabbix/zabbix-$pkgver.tar.gz
+    zabbix-getloadavg.patch
+    automake.patch
+    musl-fix-includes.patch
+    zabbix-custom-rootfs-support-3.2.3.patch
+"
+
+_builddir="$srcdir"/zabbix-$pkgver
+
+# security fixes:
+#   3.0.4-r0:
+#   - CVE N/A ZBX-11023
+
+prepare() {
+    cd "$_builddir"
+    # update_config_sub || return 1
+    for i in $source; do
+        case $i in
+        *eglibc*.patch)
+            if [ "$CLIBC" == "eglibc" ]; then
+                msg "Applying $i"
+                patch -p1 -i "$srcdir"/$i || return 1
+            fi
+            ;;
+        *.patch)
+            msg "Applying $i"
+            patch -p1 -i "$srcdir"/$i || return 1
+            ;;
+        esac
+    done
+    aclocal -I m4 && autoconf && autoheader \
+        && automake --add-missing || return 1
+    # update_config_sub
+}
+
+build() {
+    _configure="--prefix=/usr \
+        --sysconfdir=/etc/zabbix \
+        --mandir=/usr/share/man \
+        --infodir=/usr/share/info \
+        --enable-ipv6 \
+        --with-net-snmp \
+        --with-libcurl \
+        --with-libxml2 \
+        --with-openipmi \
+        --with-unixodbc \
+        --with-ssh2 \
+        --with-gnutls"
+
+    cd "$_builddir"
+    ./configure \
+        --enable-java \
+        --build=$CBUILD \
+        --host=$CHOST \
+        $_configure \
+        || return 1
+    make || return 1
+}
+
+package() {
+    mkdir -p "$pkgdir"/usr/share/zabbix/zabbix_java
+    mv "$_builddir"/src/zabbix_java/bin \
+        "$pkgdir"/usr/share/zabbix/zabbix_java/
+    mv "$_builddir"/src/zabbix_java/lib \
+        "$pkgdir"/usr/share/zabbix/zabbix_java/
+    mv "$_builddir"/src/zabbix_java/*.sh \
+        "$pkgdir"/usr/share/zabbix/zabbix_java/
+}
+
+md5sums="b058115f9218b085310cd07bbbeb9cd0  zabbix-3.2.3.tar.gz
+3a71e310bd2b38498a7c6830169f7480  zabbix-getloadavg.patch
+bf62c539870874e11de39c60cb974786  automake.patch
+40c81bdec85815f4ba637eb6528cc5e8  musl-fix-includes.patch
+e0602556506e94ae4e94f9677d7593d3  zabbix-custom-rootfs-support-3.2.3.patch"
+sha256sums="e6dba74039d8d6efff86ec3da99909f4daeaeb66d48781bbb666e3094533da25  zabbix-3.2.3.tar.gz
+d2c0651c5fa67a1857707552e79ecece7ca95c149042460c40456634bf7611dc  zabbix-getloadavg.patch
+b347ca77660e69bea353c50e2fce0c7c4cc837f782c9f84f74ba92c1a62b4c1b  automake.patch
+38b4e1a5d5c16c7d9b31347acf710d84b693f6e1df365d1072548e897e034884  musl-fix-includes.patch
+e211f367b9bf29115105faeaf723a49e5295ec938ee15b2308e19ad9d2f94c09  zabbix-custom-rootfs-support-3.2.3.patch"
+sha512sums="5a704282765fa66d1aa53ae546d3a49a35050d6830a25a3a9ad64d73f8aff48b31e8d13f37d147c8d6244bb0f2dab21bceb5d022f1c3ffa726c10edc6e7bd1f6  zabbix-3.2.3.tar.gz
+b65c6ba7701d98ae7f6fe2124c1d2b8b8fea3c3cc7ee080bf99f5afff0aaa6a025c2a1f5136b4700b53d1b7609e6185642650d7edd013c554b2af37fddae771c  zabbix-getloadavg.patch
+9bff8966cb8b3f1767bfb1b3f3529bca5c9957f2c8179a40ded3b4e43615ba9fb408aef43092fd119b7df80b042555d05c9780fac3760176b95524aa48252fee  automake.patch
+9b87ec1ea4a9cbb501c16012d498cdae82a696f4cd495e1e8cb201d9e31c6e135da5bb264c6273f2de87297bd3e4bd16f66703610686f5d610e3316ee24aac91  musl-fix-includes.patch
+27f9611259616ab5ae61ba3ff405c21a2fb8fd5937f93388476c587ab6d36e969d9d657099ae3a6b9406467ea0017ac4b6aa81221fbed2bb0dcc5e37db231659  zabbix-custom-rootfs-support-3.2.3.patch"

@@ -1,0 +1,27 @@
+# Maintainer: Boris HUISGEN <bhuisgen@hbis.fr>
+pkgname=zabbix-frontend-php
+pkgver=3.2.3
+pkgrel=0
+pkgdesc="Zabbix Network Monitoring PHP Frontend"
+url="http://www.zabbix.com"
+arch="noarch"
+license="GPL"
+_php=php5
+_php_depends="$_php ${_php}-gd ${_php}-curl ${_php}-bcmath ${_php}-sockets
+    ${_php}-iconv ${_php}-xmlreader ${_php}-ctype ${_php}-gettext"
+depends="$_php_depends"
+pkgusers="zabbix"
+pkggroups="zabbix"
+source="http://downloads.sourceforge.net/zabbix/zabbix-$pkgver.tar.gz"
+
+_builddir="$srcdir"/zabbix-$pkgver
+
+package() {
+    _wwwdir="$pkgdir"/usr/share/webapps/zabbix
+    mkdir -p $_wwwdir
+    mv "$_builddir"/frontends/php/* "$_wwwdir"
+}
+
+md5sums="b058115f9218b085310cd07bbbeb9cd0  zabbix-3.2.3.tar.gz"
+sha256sums="e6dba74039d8d6efff86ec3da99909f4daeaeb66d48781bbb666e3094533da25  zabbix-3.2.3.tar.gz"
+sha512sums="5a704282765fa66d1aa53ae546d3a49a35050d6830a25a3a9ad64d73f8aff48b31e8d13f37d147c8d6244bb0f2dab21bceb5d022f1c3ffa726c10edc6e7bd1f6  zabbix-3.2.3.tar.gz"
