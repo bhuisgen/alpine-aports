@@ -2,7 +2,7 @@
 
 depend() {
 	need net
-	use mysql postgresql
+	use postgresql
 	after firewall
 }
 

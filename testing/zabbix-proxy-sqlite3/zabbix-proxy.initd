@@ -5,7 +5,6 @@
 
 depend() {
 	need net
-	#use mysql postgresql
 }
 
 start() {
