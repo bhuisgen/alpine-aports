@@ -1,0 +1,6 @@
+#!/bin/sh
+
+addgroup -S pdagent 2>/dev/null
+adduser -S -D -H -h /dev/null -s /sbin/nologin -G pdagent -g pdagent pdagent 2>/dev/null
+
+exit 0

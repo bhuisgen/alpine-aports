@@ -1,0 +1,43 @@
+# Maintainer: Boris HUISGEN <bhuisgen@hbis.fr>
+pkgname=pdagent-integrations
+pkgver=1.4
+pkgrel=0
+pkgdesc="PagerDuty Agent integrations"
+url="http://www.pagerduty.com"
+arch="noarch"
+license="GPL"
+depends="python2"
+depends_dev=""
+makedepends="python2-dev"
+install="$pkgname.pre-install"
+pkgusers="pdagent"
+pkggroups="pdagent"
+source="${pkgname}-${pkgver}.tar.gz::https://github.com/PagerDuty/pdagent-integrations/archive/v$pkgver.tar.gz
+"
+
+_builddir="$srcdir"/pdagent-integrations-$pkgver
+
+prepare() {
+	local i
+	cd "$_builddir"
+	for i in $source; do
+		case $i in
+		*.patch) msg $i; patch -p1 -i "$srcdir"/$i || return 1;;
+		esac
+	done
+}
+
+build() {
+	true
+}
+
+check() {
+	true
+}
+
+package() {
+	mkdir -p "$pkgdir"/usr/share/pdagent-integrations/bin
+	cp "$_builddir"/bin/* "$pkgdir"/usr/share/pdagent-integrations/bin
+}
+
+sha512sums="1b5266df58d6ad681b75a9996b31a7b9209092e6352ebe9d001b5d0b2eec689b4367cdb1671298e68ef14a2437ad596190de78bc856653bfa95f93b9f878ad79  pdagent-integrations-1.4.tar.gz"

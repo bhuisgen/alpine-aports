@@ -1,0 +1,63 @@
+# Maintainer: Boris HUISGEN <bhuisgen@hbis.fr>
+pkgname=pdagent
+pkgver=1.4
+pkgrel=0
+pkgdesc="PagerDuty Agent"
+url="http://www.pagerduty.com"
+arch="noarch"
+license="GPL"
+depends="python2"
+depends_dev=""
+makedepends="python2-dev"
+install="$pkgname.pre-install"
+pkgusers="pdagent"
+pkggroups="pdagent"
+source="${pkgname}-${pkgver}.tar.gz::https://github.com/PagerDuty/pdagent/archive/v$pkgver.tar.gz
+    pdagent.initd
+"
+
+_builddir="$srcdir"/pdagent-$pkgver
+
+prepare() {
+	local i
+	cd "$_builddir"
+	for i in $source; do
+		case $i in
+		*.patch) msg $i; patch -p1 -i "$srcdir"/$i || return 1;;
+		esac
+	done
+}
+
+build() {
+    cd "$_builddir"
+	python2 -m compileall -q -f pdagent
+}
+
+check() {
+	true
+}
+
+package() {
+    install -d -m0750 -o pdagent -g pdagent \
+        "$pkgdir"/var/run/pdagent "$pkgdir"/var/log/pdagent
+	install -d -m0755 -o pdagent -g pdagent \
+		"$pkgdir"/var/lib/pdagent "$pkgdir"/var/lib/pdagent/db "$pkgdir"/var/lib/pdagent/outqueue
+	install -d -m0750 -o pdagent -g pdagent \
+		"$pkgdir"/var/lib/pdagent/outqueue/err "$pkgdir"/var/lib/pdagent/outqueue/suc
+	install -d -m0753 -o pdagent -g pdagent \
+		"$pkgdir"/var/lib/pdagent/outqueue/tmp "$pkgdir"/var/lib/pdagent/outqueue/pdq
+	install -D -m0644 "$_builddir"/conf/pdagent.conf \
+	    "$pkgdir"/etc/pdagent.conf
+	install -D -m0755 "$srcdir"/pdagent.initd \
+	    "$pkgdir"/etc/init.d/pdagent
+
+	mkdir -p "$pkgdir"/usr/bin/
+	cp -r "$_builddir"/bin/pd-* "$pkgdir"/usr/bin/
+	mkdir -p "$pkgdir"/usr/share/pdagent/bin/
+	cp "$_builddir"/bin/pdagentd.py "$pkgdir"/usr/share/pdagent/bin/
+	mkdir -p "$pkgdir"/usr/lib/python2.7/site-packages/
+	cp -ar "$_builddir"/pdagent "$pkgdir"/usr/lib/python2.7/site-packages/
+}
+
+sha512sums="1a5e78ab20293e672a8499a4a73d0b46bfd8e892c777fa67d731410962001d77b522fcd0e363342bb6a2458f1303c9f6e9944241a19655663b47fe36375c7267  pdagent-1.4.tar.gz
+a38ccc67c888375a384b1696cfbef2a40a9b0cc3c48b077d4b8478e1fd50b1b1d924755db99cc3e4247a88cd2572c27f5562dbb3fdf2512e865d8f372618410d  pdagent.initd"

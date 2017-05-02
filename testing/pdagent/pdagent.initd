@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+
+pidfile=/var/run/pdagent/pdagent.pid
+user=pdagent
+group=pdagent
+
+start_pre() {
+	checkpath --owner ${user}:${group} --directory ${pidfile%/*}
+}
+
+
+depend() {
+	need net
+	provide pdagent
+}
+
+start() {
+	ebegin "Starting PagerDuty agent"
+	start-stop-daemon --pidfile ${pidfile} --start --user ${user}:${group} --exec /usr/sbin/zabbix_agentd
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping PagerDuty agent"
+	start-stop-daemon  --stop --user ${user} --pidfile ${pidfile}
+	eend $?
+}
+
