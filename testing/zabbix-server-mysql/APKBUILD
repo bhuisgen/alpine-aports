@@ -1,0 +1,114 @@
+# Maintainer: Boris HUISGEN <bhuisgen@hbis.fr>
+pkgname=zabbix-server-mysql
+pkgver=3.2.4
+pkgrel=0
+pkgdesc="Zabbix Network Monitoring Server with MySQL storage"
+url="http://www.zabbix.com"
+arch="all"
+license="GPL"
+depends="fping"
+makedepends="autoconf automake curl-dev gnutls-dev libssh2-dev libxml2-dev
+    mariadb-dev net-snmp-dev openipmi-dev openjdk8 postgresql-dev sqlite-dev
+    unixodbc-dev"
+install="$pkgname.pre-install"
+pkgusers="zabbix"
+pkggroups="zabbix"
+source="http://downloads.sourceforge.net/zabbix/zabbix-$pkgver.tar.gz
+    zabbix-getloadavg.patch
+    automake.patch
+    musl-fix-includes.patch
+    zabbix-server.initd
+    zabbix-server.confd
+    zabbix_server.conf.patch
+    zabbix-custom-rootfs-support-3.2.4.patch
+"
+
+_builddir="$srcdir"/zabbix-$pkgver
+
+# security fixes:
+#   3.0.4-r0:
+#   - CVE N/A ZBX-11023
+
+prepare() {
+    cd "$_builddir"
+    # update_config_sub || return 1
+    for i in $source; do
+        case $i in
+        *eglibc*.patch)
+            if [ "$CLIBC" == "eglibc" ]; then
+                msg "Applying $i"
+                patch -p1 -i "$srcdir"/$i || return 1
+            fi
+            ;;
+        *.patch)
+            msg "Applying $i"
+            patch -p1 -i "$srcdir"/$i || return 1
+            ;;
+        esac
+    done
+    aclocal -I m4 && autoconf && autoheader \
+        && automake --add-missing || return 1
+    # update_config_sub
+    # Fix config file locations
+    sed -i "$_builddir"/conf/zabbix_server.conf \
+        -e 's|SNMPTrapperFile=/tmp|SNMPTrapperFile=/var/log/zabbix|' \
+        -e 's|PidFile=/tmp|PidFile=/var/run/zabbix|' \
+        -e 's|LogFile=/tmp|LogFile=/var/log/zabbix|' || return 1
+}
+
+build() {
+    _configure="--prefix=/usr \
+        --sysconfdir=/etc/zabbix \
+        --mandir=/usr/share/man \
+        --infodir=/usr/share/info \
+        --enable-ipv6 \
+        --with-net-snmp \
+        --with-libcurl \
+        --with-libxml2 \
+        --with-openipmi \
+        --with-unixodbc \
+        --with-ssh2 \
+        --with-gnutls"
+
+    cd "$_builddir"
+    ./configure \
+        --enable-server \
+        --with-mysql \
+        --build=$CBUILD \
+        --host=$CHOST \
+        $_configure \
+        || return 1
+    make || return 1
+}
+
+package() {
+    install -d -m0750 -o zabbix -g zabbix \
+        "$pkgdir"/var/run/zabbix "$pkgdir"/var/log/zabbix
+    install -D -m0644 "$_builddir"/conf/zabbix_server.conf \
+        "$pkgdir"/etc/zabbix/zabbix_server.conf
+    install -D -m0755 "$srcdir"/zabbix-server.initd \
+        "$pkgdir"/etc/init.d/zabbix-server || return 1
+    install -D -m0644 "$srcdir"/zabbix-server.confd \
+        "$pkgdir"/etc/conf.d/zabbix-server || return 1
+    mkdir -p "$pkgdir"/usr/sbin || return 1
+    mv "$_builddir"/src/zabbix_server/zabbix_server \
+        "$pkgdir"/usr/sbin/ || return 1
+    mkdir -p "$pkgdir"/usr/share/zabbix/database || return 1
+    mv "$_builddir"/database/mysql \
+        "$pkgdir"/usr/share/zabbix/database/ || return 1
+    cd "$_builddir"
+    for i in upgrades/dbpatches/*/mysql; do
+        [ -e $i ] || continue
+        mkdir -p "$pkgdir"/usr/share/zabbix/${i%/*}
+        mv "$i" "$pkgdir"/usr/share/zabbix/$i
+    done
+}
+
+sha512sums="62e532bcf6a5ab82b1f943e28d46d1e64782758a405680d2c1a54e9c1092a340a50987045acbbad2b57439e3c2640d8a11fe1a29a234764859befa6a7fd779d1  zabbix-3.2.4.tar.gz
+b65c6ba7701d98ae7f6fe2124c1d2b8b8fea3c3cc7ee080bf99f5afff0aaa6a025c2a1f5136b4700b53d1b7609e6185642650d7edd013c554b2af37fddae771c  zabbix-getloadavg.patch
+9bff8966cb8b3f1767bfb1b3f3529bca5c9957f2c8179a40ded3b4e43615ba9fb408aef43092fd119b7df80b042555d05c9780fac3760176b95524aa48252fee  automake.patch
+9b87ec1ea4a9cbb501c16012d498cdae82a696f4cd495e1e8cb201d9e31c6e135da5bb264c6273f2de87297bd3e4bd16f66703610686f5d610e3316ee24aac91  musl-fix-includes.patch
+0c106c94af5b3373b4989967b39622a56f62ef4abb28ff39782240b9d333856c584ad46fa8a568953ae47f7d989ebf467f4c567fa18c646e9991ec92c4318298  zabbix-server.initd
+a91821c6086a1fc0197750cc68073419defcb7d775b11b14a993409a8f61c7a1a0a0af95de27eed9f3b8357f8362640cb1b26b91b56f4f1d714ca6f222d02b80  zabbix-server.confd
+e0c9f937d39e15fa34e70e8ae9e6578b221b51c13dc0515e807675d153a85ab6370ed20ce2d06aa4457baaf3963edce525cd00e85fb105b36b58741798d13836  zabbix_server.conf.patch
+f1b7aee4eb034b10b7c8b2c4d0d8a45cc117539fe24d58923f8bb1af220a078a91dbf2457479e243bdddd9223ab0e19f21749776071639f584de5095d23f8448  zabbix-custom-rootfs-support-3.2.4.patch"
